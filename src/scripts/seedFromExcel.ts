@@ -1,17 +1,21 @@
-import mongoose from 'mongoose';
-import path from 'path';
-import { connectDB } from '../config/db';
-import { env } from '../config/env';
-import { parseExcelFile } from '../utils/excelParser';
-import Plot from '../models/Plot';
-import Payment from '../models/Payment';
-import { BLOCK_PHASE_MAP, MONTHS } from '../config/constants';
+import mongoose from "mongoose";
+import path from "path";
+import { connectDB } from "../config/db";
+import { env } from "../config/env";
+import { parseExcelFile } from "../utils/excelParser";
+import Plot from "../models/Plot";
+import Payment from "../models/Payment";
+import { BLOCK_PHASE_MAP, MONTHS } from "../config/constants";
 
 async function seed() {
   const filePath = process.argv[2];
   if (!filePath) {
-    console.log('Usage: npx ts-node src/scripts/seedFromExcel.ts <path-to-excel-file>');
-    console.log('Example: npx ts-node src/scripts/seedFromExcel.ts ./data/kkb4.xlsx');
+    console.log(
+      "Usage: npx ts-node src/scripts/seedFromExcel.ts <path-to-excel-file>",
+    );
+    console.log(
+      "Example: npx ts-node src/scripts/seedFromExcel.ts ./data/kkb4.xlsx",
+    );
     process.exit(1);
   }
 
@@ -23,7 +27,10 @@ async function seed() {
   const parsedData = parseExcelFile(absPath);
   console.log(`\n📊 Total parsed records: ${parsedData.length}\n`);
 
-  let plotsCreated = 0, plotsUpdated = 0, paymentsUpserted = 0, errors = 0;
+  let plotsCreated = 0,
+    plotsUpdated = 0,
+    paymentsUpserted = 0,
+    errors = 0;
 
   for (const entry of parsedData) {
     try {
@@ -38,7 +45,10 @@ async function seed() {
         allotmentStatus: entry.allotmentStatus,
       };
 
-      const existingPlot = await Plot.findOne({ plotNumber: entry.plotNumber, block: entry.block });
+      const existingPlot = await Plot.findOne({
+        plotNumber: entry.plotNumber,
+        block: entry.block,
+      });
 
       let plotId: string;
       if (existingPlot) {
@@ -58,7 +68,8 @@ async function seed() {
       for (const month of MONTHS) {
         const val = entry.payments[month];
         payments[month] = val;
-        if (val !== null && val !== undefined && !isNaN(val)) totalReceived += val;
+        if (val !== null && val !== undefined && !isNaN(val))
+          totalReceived += val;
       }
 
       const totalDue = entry.mcRate * 12;
@@ -74,31 +85,34 @@ async function seed() {
             remaining: totalDue - totalReceived,
           },
         },
-        { upsert: true, new: true }
+        { upsert: true, new: true },
       );
 
       paymentsUpserted++;
     } catch (err: any) {
       errors++;
-      if (errors <= 10) console.error(`  ❌ Error for ${entry.plotBlock} (${entry.year}): ${err.message}`);
+      if (errors <= 10)
+        console.error(
+          `  ❌ Error for ${entry.plotBlock} (${entry.year}): ${err.message}`,
+        );
     }
   }
 
-  console.log('\n' + '='.repeat(50));
-  console.log('📋 IMPORT SUMMARY');
-  console.log('='.repeat(50));
+  console.log("\n" + "=".repeat(50));
+  console.log("📋 IMPORT SUMMARY");
+  console.log("=".repeat(50));
   console.log(`  Plots created:    ${plotsCreated}`);
   console.log(`  Plots updated:    ${plotsUpdated}`);
   console.log(`  Payments upserted: ${paymentsUpserted}`);
   console.log(`  Errors:           ${errors}`);
-  console.log('='.repeat(50) + '\n');
+  console.log("=".repeat(50) + "\n");
 
   await mongoose.disconnect();
-  console.log('✅ Done. Database disconnected.\n');
+  console.log("✅ Done. Database disconnected.\n");
   process.exit(0);
 }
 
 seed().catch((err) => {
-  console.error('Fatal seed error:', err);
+  console.error("Fatal seed error:", err);
   process.exit(1);
 });
