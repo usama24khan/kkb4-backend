@@ -1,12 +1,14 @@
 import { Request, Response } from 'express';
 import { StatsService } from '../services/stats.service';
-import { PHASE_BLOCK_MAP } from '../config/constants';
+import { PHASE_BLOCK_MAP, ALL_PHASES } from '../config/constants';
 import { sendSuccess, sendError } from '../utils/responseHelper';
 
 export const getAllPhases = async (req: Request, res: Response): Promise<void> => {
   try {
     const year = parseInt(req.query.year as string) || new Date().getFullYear();
-    const stats = await StatsService.getAllPhaseStats(year);
+    const monthFrom = req.query.monthFrom as string | undefined;
+    const monthTo = req.query.monthTo as string | undefined;
+    const stats = await StatsService.getAllPhaseStats(year, monthFrom, monthTo);
     sendSuccess(res, stats, 'All phases fetched');
   } catch (error: any) {
     sendError(res, 'Failed to fetch phases', 500, error.message);
@@ -15,15 +17,17 @@ export const getAllPhases = async (req: Request, res: Response): Promise<void> =
 
 export const getPhaseDetail = async (req: Request, res: Response): Promise<void> => {
   try {
-    const phase = parseInt(req.params.phase);
+    const phase = req.params.phase; // Now a string like "Phase 1"
     const year = parseInt(req.query.year as string) || new Date().getFullYear();
+    const monthFrom = req.query.monthFrom as string | undefined;
+    const monthTo = req.query.monthTo as string | undefined;
 
     if (!PHASE_BLOCK_MAP[phase]) {
-      sendError(res, 'Invalid phase number', 400);
+      sendError(res, 'Invalid phase', 400);
       return;
     }
 
-    const stats = await StatsService.getPhaseStats(phase, year);
+    const stats = await StatsService.getPhaseStats(phase, year, monthFrom, monthTo);
     sendSuccess(res, stats, 'Phase detail fetched');
   } catch (error: any) {
     sendError(res, 'Failed to fetch phase detail', 500, error.message);
@@ -32,10 +36,12 @@ export const getPhaseDetail = async (req: Request, res: Response): Promise<void>
 
 export const getPhaseStats = async (req: Request, res: Response): Promise<void> => {
   try {
-    const phase = parseInt(req.params.phase);
+    const phase = req.params.phase;
     const year = parseInt(req.query.year as string) || new Date().getFullYear();
+    const monthFrom = req.query.monthFrom as string | undefined;
+    const monthTo = req.query.monthTo as string | undefined;
 
-    const stats = await StatsService.getPhaseStats(phase, year);
+    const stats = await StatsService.getPhaseStats(phase, year, monthFrom, monthTo);
     sendSuccess(res, stats, 'Phase stats fetched');
   } catch (error: any) {
     sendError(res, 'Failed to fetch phase stats', 500, error.message);

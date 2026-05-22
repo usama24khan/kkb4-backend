@@ -8,6 +8,7 @@ import statsRoutes from './stats.routes';
 import noticeRoutes from './notice.routes';
 import importRoutes from './import.routes';
 import analyticsRoutes from './analytics.routes';
+import configRoutes from './config.routes';
 
 const router = Router();
 
@@ -20,6 +21,7 @@ router.use('/stats', statsRoutes);
 router.use('/notices', noticeRoutes);
 router.use('/import', importRoutes);
 router.use('/analytics', analyticsRoutes);
+router.use('/config', configRoutes);
 
 // Health check
 router.get('/health', (_req, res) => {

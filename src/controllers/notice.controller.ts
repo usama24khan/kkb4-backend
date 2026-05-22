@@ -9,6 +9,54 @@ import { PHASE_BLOCK_MAP } from '../config/constants';
 import path from 'path';
 import fs from 'fs';
 
+/**
+ * POST /notices/generate — Generate notices for one or multiple plots
+ * Body: { plot_ids: [id1, id2, ...], year, month_from, month_to, custom_message? }
+ */
+export const generateNotices = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { plot_ids, year: yearParam, month_from, month_to, custom_message } = req.body;
+    const year = parseInt(yearParam) || new Date().getFullYear();
+
+    if (!plot_ids || !Array.isArray(plot_ids) || plot_ids.length === 0) {
+      sendError(res, 'plot_ids array is required', 400);
+      return;
+    }
+
+    const plots = await Plot.find({ _id: { $in: plot_ids } });
+    if (!plots.length) { sendError(res, 'No plots found', 404); return; }
+
+    const plotsWithPayments = [];
+    let totalDue = 0;
+
+    for (const plot of plots) {
+      const payments = await Payment.find({ plot: plot._id }).lean();
+      plotsWithPayments.push({ plot: plot as any, payments: payments as any });
+      const yp = payments.find(p => p.year === year);
+      if (yp) totalDue += yp.remaining;
+    }
+
+    const startNumber = (await Notice.countDocuments()) + 1;
+    const pdfPaths = await generateBulkNotices(plotsWithPayments, year, startNumber);
+
+    await Notice.create({
+      type: 'plot',
+      targetId: plot_ids.join(','),
+      year,
+      monthFrom: month_from || 'jan',
+      monthTo: month_to || 'dec',
+      generatedBy: req.admin?.id,
+      plotCount: plots.length,
+      totalDue,
+      pdfPath: pdfPaths[0] || '',
+    });
+
+    sendSuccess(res, { pdfPaths, count: pdfPaths.length }, `${pdfPaths.length} notices generated`);
+  } catch (error: any) {
+    sendError(res, 'Failed to generate notices', 500, error.message);
+  }
+};
+
 export const generateForPlot = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { plotId } = req.params;
@@ -46,7 +94,7 @@ export const generateForBlock = async (req: AuthRequest, res: Response): Promise
 
 export const generateForPhase = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const phase = parseInt(req.params.phase);
+    const phase = req.params.phase;
     const year = parseInt(req.body.year) || new Date().getFullYear();
     const blocks = PHASE_BLOCK_MAP[phase];
     if (!blocks) { sendError(res, 'Invalid phase', 400); return; }
@@ -61,7 +109,7 @@ export const generateForPhase = async (req: AuthRequest, res: Response): Promise
     }
     const startNumber = (await Notice.countDocuments()) + 1;
     const pdfPaths = await generateBulkNotices(plotsWithPayments, year, startNumber);
-    await Notice.create({ type: 'phase', targetId: phase.toString(), year, generatedBy: req.admin?.id, plotCount: plots.length, totalDue, pdfPath: pdfPaths[0] || '' });
+    await Notice.create({ type: 'phase', targetId: phase, year, generatedBy: req.admin?.id, plotCount: plots.length, totalDue, pdfPath: pdfPaths[0] || '' });
     sendSuccess(res, { pdfPaths, count: pdfPaths.length }, `${pdfPaths.length} notices generated`);
   } catch (error: any) { sendError(res, 'Failed to generate notices', 500, error.message); }
 };

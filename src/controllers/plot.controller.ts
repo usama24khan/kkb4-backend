@@ -11,7 +11,7 @@ export const getPlots = async (req: Request, res: Response): Promise<void> => {
 
     const result = await PlotService.getAll({
       block: block as string,
-      phase: phase ? parseInt(phase as string) : undefined,
+      phase: phase as string,
       status: status as string,
       search: search as string,
       page: page ? parseInt(page as string) : 1,
@@ -39,6 +39,21 @@ export const getPlotById = async (req: Request, res: Response): Promise<void> =>
     sendSuccess(res, plot, 'Plot fetched');
   } catch (error: any) {
     sendError(res, 'Failed to fetch plot', 500, error.message);
+  }
+};
+
+export const searchPlots = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const q = req.query.q as string;
+    if (!q || q.trim().length === 0) {
+      sendSuccess(res, [], 'No search query provided');
+      return;
+    }
+
+    const results = await PlotService.search(q.trim(), 20);
+    sendSuccess(res, results, `Found ${results.length} plots`);
+  } catch (error: any) {
+    sendError(res, 'Search failed', 500, error.message);
   }
 };
 

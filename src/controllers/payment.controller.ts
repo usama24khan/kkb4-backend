@@ -126,3 +126,28 @@ export const createOrUpdatePayment = async (req: AuthRequest, res: Response): Pr
     sendError(res, 'Failed to save payment', 500, error.message);
   }
 };
+
+export const deletePayment = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { paymentId } = req.params;
+    const deleted = await PaymentService.deletePayment(paymentId);
+    if (!deleted) {
+      sendError(res, 'Payment not found', 404);
+      return;
+    }
+
+    if (req.admin) {
+      await AuditLog.create({
+        admin: req.admin.id,
+        action: 'delete',
+        entity: 'payment',
+        entityId: paymentId,
+        changes: { deleted: true },
+      });
+    }
+
+    sendSuccess(res, null, 'Payment record deleted');
+  } catch (error: any) {
+    sendError(res, 'Failed to delete payment', 500, error.message);
+  }
+};

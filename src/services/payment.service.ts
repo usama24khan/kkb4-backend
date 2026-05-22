@@ -1,6 +1,6 @@
 import Payment, { IPayment } from '../models/Payment';
 import Plot from '../models/Plot';
-import { MONTHS } from '../config/constants';
+import { MONTHS, getMcRateForYear } from '../config/constants';
 
 export class PaymentService {
   static async getByPlotAndYear(plotId: string, year: number) {
@@ -40,8 +40,13 @@ export class PaymentService {
     return payment.save();
   }
 
+  static async deletePayment(paymentId: string) {
+    return Payment.findByIdAndDelete(paymentId);
+  }
+
   static async upsert(plotId: string, year: number, data: Partial<IPayment>) {
     const existing = await Payment.findOne({ plot: plotId, year });
+    const defaultRate = getMcRateForYear(year);
 
     if (existing) {
       if (data.payments) {
@@ -71,7 +76,7 @@ export class PaymentService {
     const payment = new Payment({
       plot: plotId,
       year,
-      mcRate: data.mcRate || 200,
+      mcRate: data.mcRate || defaultRate,
       payments: data.payments || {},
       note: data.note || '',
     });
@@ -81,6 +86,7 @@ export class PaymentService {
 
   static async bulkUpdate(entries: Array<{ plotId: string; amount: number }>, year: number, month: string) {
     const results = [];
+    const defaultRate = getMcRateForYear(year);
 
     for (const entry of entries) {
       let payment = await Payment.findOne({ plot: entry.plotId, year });
@@ -89,7 +95,7 @@ export class PaymentService {
         payment = new Payment({
           plot: entry.plotId,
           year,
-          mcRate: 200,
+          mcRate: defaultRate,
           payments: {},
         });
       }
@@ -126,8 +132,10 @@ export class PaymentService {
     return payments;
   }
 
-  static async getPaymentsByPhase(phase: number, year: number) {
-    const plots = await Plot.find({ phase, isActive: true }).lean();
+  static async getPaymentsByPhase(phase: string, year: number) {
+    const { PHASE_BLOCK_MAP } = await import('../config/constants');
+    const blocks = PHASE_BLOCK_MAP[phase] || [];
+    const plots = await Plot.find({ block: { $in: blocks }, isActive: true }).lean();
     const plotIds = plots.map(p => p._id);
 
     const payments = await Payment.find({

@@ -42,7 +42,7 @@ export const importExcel = async (req: AuthRequest, res: Response): Promise<void
           ownerName: entry.ownerName,
           plotNumber: entry.plotNumber,
           block: entry.block,
-          phase: BLOCK_PHASE_MAP[entry.block] || 0,
+          phase: BLOCK_PHASE_MAP[entry.block] || '',
           plotBlock: entry.plotBlock,
           allotmentStatus: entry.allotmentStatus as any,
         });

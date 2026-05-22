@@ -6,8 +6,9 @@ export interface IPlot extends Document {
   ownerName: string;
   plotNumber: string;
   block: string;
-  phase: number;
+  phase: string;
   plotBlock: string;
+  plotCode: string;
   allotmentStatus: 'Active' | 'Cancelled' | 'Unsold' | 'Unknown';
   isActive: boolean;
   createdAt: Date;
@@ -25,8 +26,9 @@ const PlotSchema = new Schema<IPlot>(
       uppercase: true,
       trim: true,
     },
-    phase: { type: Number },
+    phase: { type: String, default: '' },
     plotBlock: { type: String, index: true, trim: true },
+    plotCode: { type: String, index: true, trim: true },
     allotmentStatus: {
       type: String,
       enum: ALLOTMENT_STATUSES,
@@ -39,24 +41,26 @@ const PlotSchema = new Schema<IPlot>(
   }
 );
 
-// Derive phase and plotBlock before saving
+// Derive phase, plotBlock, and plotCode before saving
 PlotSchema.pre('save', function (next) {
   if (this.block) {
-    this.phase = BLOCK_PHASE_MAP[this.block.toUpperCase()] || 0;
+    this.phase = BLOCK_PHASE_MAP[this.block.toUpperCase()] || '';
   }
   this.plotBlock = `${this.plotNumber} ${this.block}`.trim();
+  this.plotCode = `${this.plotNumber}-${this.block}`.trim();
   next();
 });
 
 PlotSchema.pre('findOneAndUpdate', function (next) {
   const update = this.getUpdate() as any;
   if (update?.block) {
-    update.phase = BLOCK_PHASE_MAP[update.block.toUpperCase()] || 0;
+    update.phase = BLOCK_PHASE_MAP[update.block.toUpperCase()] || '';
   }
   if (update?.plotNumber || update?.block) {
     const plotNum = update.plotNumber || '';
     const block = update.block || '';
     update.plotBlock = `${plotNum} ${block}`.trim();
+    update.plotCode = `${plotNum}-${block}`.trim();
   }
   next();
 });

@@ -3,6 +3,7 @@ import Admin from '../models/Admin';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt';
 import { sendSuccess, sendError } from '../utils/responseHelper';
 import { env } from '../config/env';
+import { AuthRequest } from '../middleware/auth.middleware';
 
 export const login = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -36,6 +37,30 @@ export const login = async (req: Request, res: Response): Promise<void> => {
     }, 'Login successful');
   } catch (error: any) {
     sendError(res, 'Login failed', 500, error.message);
+  }
+};
+
+export const getMe = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    if (!req.admin) {
+      sendError(res, 'Not authenticated', 401);
+      return;
+    }
+
+    const admin = await Admin.findById(req.admin.id).select('-passwordHash').lean();
+    if (!admin) {
+      sendError(res, 'User not found', 404);
+      return;
+    }
+
+    sendSuccess(res, {
+      id: admin._id,
+      name: admin.name,
+      email: admin.email,
+      role: admin.role,
+    }, 'User info fetched');
+  } catch (error: any) {
+    sendError(res, 'Failed to get user info', 500, error.message);
   }
 };
 

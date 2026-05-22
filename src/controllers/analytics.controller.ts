@@ -3,21 +3,23 @@ import Plot from '../models/Plot';
 import Payment from '../models/Payment';
 import Year from '../models/Year';
 import { sendSuccess, sendError } from '../utils/responseHelper';
-import { BLOCK_PHASE_MAP, ALL_BLOCKS, MC_RATE_BY_YEAR, DEFAULT_MC_RATE } from '../config/constants';
+import { BLOCK_PHASE_MAP, ALL_BLOCKS, MC_RATE_BY_YEAR, DEFAULT_MC_RATE, MONTHS, PHASE_BLOCK_MAP, ALL_PHASES, getMcRateForYear } from '../config/constants';
 
-const MONTH_ORDER = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const MONTH_ORDER = MONTHS;
 
 export const getAnalyticsOverview = async (req: Request, res: Response): Promise<void> => {
   try {
-    const year = parseInt(req.query.year as string) || new Date().getFullYear();
+    const yearParam = req.query.year as string;
+    const isOverall = yearParam === 'overall' || yearParam === '0';
+    const year = isOverall ? 0 : (parseInt(yearParam) || new Date().getFullYear());
     const monthFrom = req.query.monthFrom as string | undefined;
     const monthTo = req.query.monthTo as string | undefined;
     const block = req.query.block as string | undefined;
     const phase = req.query.phase as string | undefined;
 
     // Resolve month range (inclusive)
-    const startIndex = monthFrom ? MONTH_ORDER.indexOf(monthFrom.toLowerCase()) : 0;
-    const endIndex = monthTo ? MONTH_ORDER.indexOf(monthTo.toLowerCase()) : 11;
+    const startIndex = monthFrom ? MONTH_ORDER.indexOf(monthFrom.toLowerCase() as any) : 0;
+    const endIndex = monthTo ? MONTH_ORDER.indexOf(monthTo.toLowerCase() as any) : 11;
     const monthsInRange = MONTH_ORDER.slice(
       startIndex === -1 ? 0 : startIndex,
       endIndex === -1 ? 11 : endIndex + 1
@@ -29,7 +31,10 @@ export const getAnalyticsOverview = async (req: Request, res: Response): Promise
       plotQuery.block = block.toUpperCase();
     }
     if (phase) {
-      plotQuery.phase = parseInt(phase);
+      const phaseBlocks = PHASE_BLOCK_MAP[phase];
+      if (phaseBlocks) {
+        plotQuery.block = { $in: phaseBlocks };
+      }
     }
 
     const plots = await Plot.find(plotQuery).lean();
@@ -37,39 +42,51 @@ export const getAnalyticsOverview = async (req: Request, res: Response): Promise
     const activePlots = plots.filter(p => p.allotmentStatus === 'Active').length;
     const cancelledPlots = plots.filter(p => p.allotmentStatus === 'Cancelled').length;
 
-    // Get live maintenance rate for year
-    let yearMcRate = MC_RATE_BY_YEAR[year] || DEFAULT_MC_RATE;
-    const yearDoc = await Year.findOne({ year, isActive: true }).lean();
-    if (yearDoc) {
-      yearMcRate = yearDoc.mcRate;
-    }
-
-    // Query all payment records for these plots in the selected year
+    // Query payment records
     const plotIds = plots.map(p => p._id);
-    const payments = await Payment.find({ plot: { $in: plotIds }, year }).lean();
-    const paymentsMap = new Map(payments.map(p => [p.plot.toString(), p]));
+    const paymentFilter: any = { plot: { $in: plotIds } };
+    if (!isOverall) paymentFilter.year = year;
+    const payments = await Payment.find(paymentFilter).lean();
+
+    // Build a map: plotId → [payments]
+    const paymentsMapByPlot = new Map<string, any[]>();
+    for (const p of payments) {
+      const key = p.plot.toString();
+      if (!paymentsMapByPlot.has(key)) paymentsMapByPlot.set(key, []);
+      paymentsMapByPlot.get(key)!.push(p);
+    }
 
     // Calculate individual plot metrics
     const plotStats = plots.map(plot => {
-      const payDoc = paymentsMap.get(plot._id.toString());
-      const mcRate = payDoc ? payDoc.mcRate : yearMcRate;
+      const plotPayments = paymentsMapByPlot.get(plot._id.toString()) || [];
 
       let plotDue = 0;
       let plotReceived = 0;
 
-      monthsInRange.forEach(m => {
-        plotDue += mcRate;
-        if (payDoc && payDoc.payments) {
-          const val = (payDoc.payments as any)[m];
-          if (val !== null && val !== undefined && !isNaN(val)) {
-            plotReceived += val;
-          }
+      if (isOverall) {
+        // Sum across all years
+        for (const payDoc of plotPayments) {
+          plotDue += payDoc.totalDue || 0;
+          plotReceived += payDoc.totalReceived || 0;
         }
-      });
+      } else {
+        const payDoc = plotPayments.find((p: any) => p.year === year);
+        const mcRate = payDoc ? payDoc.mcRate : getMcRateForYear(year);
+        
+        monthsInRange.forEach(m => {
+          plotDue += mcRate;
+          if (payDoc && payDoc.payments) {
+            const val = (payDoc.payments as any)[m];
+            if (val !== null && val !== undefined && !isNaN(val)) {
+              plotReceived += val;
+            }
+          }
+        });
+      }
 
       return {
         plot,
-        mcRate,
+        mcRate: isOverall ? 0 : (plotPayments.find((p: any) => p.year === year)?.mcRate || getMcRateForYear(year)),
         due: plotDue,
         received: plotReceived,
         remaining: plotDue - plotReceived,
@@ -82,46 +99,50 @@ export const getAnalyticsOverview = async (req: Request, res: Response): Promise
     const sumRemaining = sumDue - sumReceived;
     const collectionRate = sumDue > 0 ? Math.round((sumReceived / sumDue) * 1000) / 10 : 0;
 
-    // Per-month breakdown
-    const perMonthBreakdown = monthsInRange.map(m => {
-      let monthDue = 0;
-      let monthReceived = 0;
+    // Per-month breakdown (only for specific year, not overall)
+    let perMonthBreakdown: any[] = [];
+    if (!isOverall) {
+      perMonthBreakdown = monthsInRange.map(m => {
+        let monthDue = 0;
+        let monthReceived = 0;
 
-      plotStats.forEach(ps => {
-        monthDue += ps.mcRate;
-        const payDoc = paymentsMap.get(ps.plot._id.toString());
-        if (payDoc && payDoc.payments) {
-          const val = (payDoc.payments as any)[m];
-          if (val !== null && val !== undefined && !isNaN(val)) {
-            monthReceived += val;
+        plotStats.forEach(ps => {
+          monthDue += ps.mcRate;
+          const plotPayments = paymentsMapByPlot.get(ps.plot._id.toString()) || [];
+          const payDoc = plotPayments.find((p: any) => p.year === year);
+          if (payDoc && payDoc.payments) {
+            const val = (payDoc.payments as any)[m];
+            if (val !== null && val !== undefined && !isNaN(val)) {
+              monthReceived += val;
+            }
           }
-        }
+        });
+
+        const monthRemaining = monthDue - monthReceived;
+        const monthCollectionRate = monthDue > 0 ? Math.round((monthReceived / monthDue) * 100) : 0;
+
+        return {
+          month: m,
+          due: monthDue,
+          received: monthReceived,
+          remaining: monthRemaining,
+          collectionRate: monthCollectionRate,
+        };
       });
-
-      const monthRemaining = monthDue - monthReceived;
-      const monthCollectionRate = monthDue > 0 ? Math.round((monthReceived / monthDue) * 100) : 0;
-
-      return {
-        month: m,
-        due: monthDue,
-        received: monthReceived,
-        remaining: monthRemaining,
-        collectionRate: monthCollectionRate,
-      };
-    });
+    }
 
     // Per-block breakdown
-    let blocksList = ALL_BLOCKS;
+    let blocksList = [...ALL_BLOCKS];
     if (phase) {
-      const targetPhase = parseInt(phase);
-      blocksList = ALL_BLOCKS.filter(b => BLOCK_PHASE_MAP[b] === targetPhase);
+      const phaseBlocks = PHASE_BLOCK_MAP[phase];
+      if (phaseBlocks) blocksList = phaseBlocks;
     }
     if (block) {
       blocksList = blocksList.filter(b => b === block.toUpperCase());
     }
 
     const perBlockBreakdown = blocksList.map(b => {
-      const blockPhase = BLOCK_PHASE_MAP[b] || 0;
+      const blockPhase = BLOCK_PHASE_MAP[b] || '';
       const blockPlotStats = plotStats.filter(ps => ps.plot.block === b);
 
       const bPlots = blockPlotStats.length;
@@ -129,6 +150,8 @@ export const getAnalyticsOverview = async (req: Request, res: Response): Promise
       const bReceived = blockPlotStats.reduce((acc, curr) => acc + curr.received, 0);
       const bRemaining = bDue - bReceived;
       const bRate = bDue > 0 ? Math.round((bReceived / bDue) * 100) : 0;
+      const bPaidCount = blockPlotStats.filter(ps => ps.received > 0).length;
+      const bDefaulterCount = blockPlotStats.filter(ps => ps.received === 0).length;
 
       return {
         block: b,
@@ -138,6 +161,8 @@ export const getAnalyticsOverview = async (req: Request, res: Response): Promise
         due: bDue,
         remaining: bRemaining,
         collectionRate: bRate,
+        paidCount: bPaidCount,
+        defaulterCount: bDefaulterCount,
       };
     }).filter(b => b.totalPlots > 0);
 
@@ -149,6 +174,9 @@ export const getAnalyticsOverview = async (req: Request, res: Response): Promise
       .map(ps => ({
         ownerName: ps.plot.ownerName,
         plotBlock: ps.plot.plotBlock,
+        plotCode: `${ps.plot.plotNumber}-${ps.plot.block}`,
+        block: ps.plot.block,
+        phase: ps.plot.phase,
         remaining: ps.remaining,
       }));
 
@@ -160,12 +188,16 @@ export const getAnalyticsOverview = async (req: Request, res: Response): Promise
       .map(ps => ({
         ownerName: ps.plot.ownerName,
         plotBlock: ps.plot.plotBlock,
+        plotCode: `${ps.plot.plotNumber}-${ps.plot.block}`,
+        block: ps.plot.block,
+        phase: ps.plot.phase,
         totalReceived: ps.received,
       }));
 
     sendSuccess(
       res,
       {
+        year: isOverall ? 'overall' : year,
         totalPlots,
         activePlots,
         cancelledPlots,

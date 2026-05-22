@@ -4,8 +4,11 @@ import { sendSuccess, sendError } from '../utils/responseHelper';
 
 export const getOverview = async (req: Request, res: Response): Promise<void> => {
   try {
-    const year = parseInt(req.query.year as string) || new Date().getFullYear();
-    const overview = await StatsService.getOverview(year);
+    const yearParam = req.query.year as string;
+    const year = yearParam === 'overall' ? 0 : (parseInt(yearParam) || new Date().getFullYear());
+    const monthFrom = req.query.monthFrom as string | undefined;
+    const monthTo = req.query.monthTo as string | undefined;
+    const overview = await StatsService.getOverview(year, monthFrom, monthTo);
     sendSuccess(res, overview, 'Overview fetched');
   } catch (error: any) {
     sendError(res, 'Failed to fetch overview', 500, error.message);
@@ -16,10 +19,25 @@ export const getTopPlots = async (req: Request, res: Response): Promise<void> =>
   try {
     const year = parseInt(req.query.year as string) || new Date().getFullYear();
     const limit = parseInt(req.query.limit as string) || 10;
-    const topPlots = await StatsService.getTopPlots(year, limit);
+    const monthFrom = req.query.monthFrom as string | undefined;
+    const monthTo = req.query.monthTo as string | undefined;
+    const topPlots = await StatsService.getTopPlots(year, limit, monthFrom, monthTo);
     sendSuccess(res, topPlots, 'Top plots fetched');
   } catch (error: any) {
     sendError(res, 'Failed to fetch top plots', 500, error.message);
+  }
+};
+
+export const getTopDefaulters = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const year = parseInt(req.query.year as string) || new Date().getFullYear();
+    const limit = parseInt(req.query.limit as string) || 10;
+    const monthFrom = req.query.monthFrom as string | undefined;
+    const monthTo = req.query.monthTo as string | undefined;
+    const topDefaulters = await StatsService.getTopDefaulters(year, limit, monthFrom, monthTo);
+    sendSuccess(res, topDefaulters, 'Top defaulters fetched');
+  } catch (error: any) {
+    sendError(res, 'Failed to fetch top defaulters', 500, error.message);
   }
 };
 
@@ -65,7 +83,7 @@ export const getYearRange = async (req: Request, res: Response): Promise<void> =
       from, to,
       plotId as string,
       block as string,
-      phase ? parseInt(phase as string) : undefined
+      phase as string
     );
 
     sendSuccess(res, data, 'Year range stats fetched');
