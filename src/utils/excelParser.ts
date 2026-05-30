@@ -2,22 +2,27 @@
  * src/utils/excelParser.ts
  *
  * Parses KKB4 maintenance Excel file.
- * Each sheet corresponds to a year (derived from sheet name).
- * Each row represents a plot's payment data for that year.
  *
- * Block tracking convention:
- *   - First/last plot of each block: "374 A" (number + space + letter)
- *   - Middle plots of a block: plain number "375"
- *   - Block letter is carried forward row-by-row via createBlockTracker()
+ * Two problems solved together:
+ *
+ * 1. BLOCK TRACKER (from original blockHelpers logic, inlined here):
+ *    The Excel uses a carry-forward convention:
+ *      - First plot of a block:  "374 A"  (number + letter → sets current block)
+ *      - Middle plots:           "375"    (plain number   → inherits current block)
+ *      - Last plot of block:     "396 A"  (also sets block)
+ *    Without this tracker, every middle-block row gets skipped.
+ *
+ * 2. DYNAMIC COLUMN DETECTION:
+ *    Every sheet has a different layout — extra columns before months, 2023 has
+ *    a blank col[0] shifting everything right, 2022 has duplicate month headers.
+ *    We detect column positions by header name, not by hardcoded index.
+ *    For duplicate month headers (2022) we take the LAST occurrence.
  */
 
 import * as XLSX from "xlsx";
-import {
-  createBlockTracker,
-  isBlockHeaderRow,
-  extractBlockFromPlotStr,
-} from "./blockHelpers";
 import { MC_RATE_BY_YEAR, MONTHS, DEFAULT_MC_RATE } from "../config/constants";
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface ParsedPlotData {
   srNo: number;
@@ -31,341 +36,318 @@ export interface ParsedPlotData {
   year: number;
 }
 
-// ── Sheet → Year mapping ──────────────────────────────────────────────────────
-
-const SHEET_YEAR_MAP: Record<string, number> = {
-  "M.C2012": 2012,
-  "M.C 2013": 2013,
-  "M.C2014": 2014,
-  "M.c2018": 2018,
-  "M.c2019": 2019,
-  "M.c2020": 2020,
-  "M.c2021": 2021,
-  "M.C 2022": 2022,
-  "M.C 2023": 2023,
-  "M.C 2024": 2024,
-  "Maintanance Expense 2025": 2025,
-  "Maintanance Expense 2026": 2026,
-};
-
-// ── Month aliases ─────────────────────────────────────────────────────────────
+// ── Month header aliases ──────────────────────────────────────────────────────
 
 const MONTH_ALIASES: Record<string, string> = {
-  january: "jan",
   jan: "jan",
+  january: "jan",
   "jan.": "jan",
-  february: "feb",
   feb: "feb",
+  february: "feb",
   "feb.": "feb",
-  march: "mar",
   mar: "mar",
+  march: "mar",
   "mar.": "mar",
-  april: "apr",
   apr: "apr",
+  april: "apr",
   "apr.": "apr",
   may: "may",
-  june: "jun",
   jun: "jun",
+  june: "jun",
   "jun.": "jun",
-  july: "jul",
   jul: "jul",
+  july: "jul",
   "jul.": "jul",
-  august: "aug",
   aug: "aug",
+  august: "aug",
   "aug.": "aug",
-  september: "sep",
   sep: "sep",
+  september: "sep",
   "sep.": "sep",
   sept: "sep",
-  october: "oct",
   oct: "oct",
+  october: "oct",
   "oct.": "oct",
-  november: "nov",
   nov: "nov",
+  november: "nov",
   "nov.": "nov",
-  december: "dec",
   dec: "dec",
+  december: "dec",
   "dec.": "dec",
 };
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Column detection (dynamic, by header name) ────────────────────────────────
 
-function findYearFromSheetName(sheetName: string): number | null {
-  if (SHEET_YEAR_MAP[sheetName]) return SHEET_YEAR_MAP[sheetName];
-  const m = sheetName.match(/(\d{4})/);
-  return m ? parseInt(m[1]) : null;
+interface ColMap {
+  srNo: number;
+  name: number;
+  plotBlock: number;
+  mc: number;
+  allotment: number | null;
+  months: Record<string, number>; // month key → col index (last occurrence wins)
 }
 
-function normalizeHeader(header: string): string {
-  return (
-    header
-      ?.toString()
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, "") || ""
+function normalizeHeader(h: any): string {
+  if (h === null || h === undefined) return "";
+  // Strip whitespace, newlines, dots, hashes, backslashes
+  return String(h)
+    .replace(/[\s\n\r\\.#\\\\]+/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function detectColumns(headerRow: any[]): ColMap | null {
+  const normalized = headerRow.map(normalizeHeader);
+
+  // srNo: matches "srno", "sr#", "sr", anything starting with "srn"
+  const srNoIdx = normalized.findIndex(
+    (h) => h === "srno" || h === "sr#" || h === "sr" || h.startsWith("srn"),
   );
-}
 
-function findColumnMapping(headers: string[]): Record<string, number> {
-  const mapping: Record<string, number> = {};
+  // name: exact "name"
+  const nameIdx = normalized.findIndex((h) => h === "name");
 
-  headers.forEach((header, idx) => {
-    const n = normalizeHeader(header);
-    if (!n) return;
+  // plotBlock: contains both "plot" and "block"
+  const plotBlockIdx = normalized.findIndex(
+    (h) => h.includes("plot") && h.includes("block"),
+  );
 
-    // Sr No
-    if (
-      mapping.srNo === undefined &&
-      (n === "sr" || n === "srno" || n === "sr#" || n.startsWith("sr"))
-    )
-      mapping.srNo = idx;
+  // mc: exact "mc"
+  const mcIdx = normalized.findIndex((h) => h === "mc");
 
-    // Owner name
-    if (
-      mapping.ownerName === undefined &&
-      (n.includes("name") || n.includes("owner") || n.includes("allottee"))
-    )
-      mapping.ownerName = idx;
+  if (srNoIdx === -1 || nameIdx === -1 || plotBlockIdx === -1 || mcIdx === -1) {
+    return null;
+  }
 
-    // Plot/Block column — must include "plot" or "block" but NOT be a month
-    if (mapping.plotBlock === undefined) {
-      const isMonth = !!MONTH_ALIASES[header?.toString().trim().toLowerCase()];
-      if (!isMonth && (n.includes("plot") || n.includes("block"))) {
-        mapping.plotBlock = idx;
-      }
+  // allotment: optional — not present in sheets 2021+
+  const allotmentIdx = normalized.findIndex((h) => h === "allotment");
+
+  // Months: find ALL occurrences per month, take the LAST one.
+  // This fixes 2022 which has Jan–Jun duplicated (we want the second set).
+  const monthOccurrences: Record<string, number[]> = {};
+  for (let i = 0; i < headerRow.length; i++) {
+    const raw = headerRow[i]?.toString().trim().toLowerCase() ?? "";
+    const monthKey = MONTH_ALIASES[raw];
+    if (monthKey) {
+      if (!monthOccurrences[monthKey]) monthOccurrences[monthKey] = [];
+      monthOccurrences[monthKey].push(i);
     }
+  }
 
-    // MC Rate
-    if (
-      mapping.mcRate === undefined &&
-      (n === "mc" ||
-        n.includes("maintenance") ||
-        n.includes("charge") ||
-        n.includes("rate"))
-    )
-      mapping.mcRate = idx;
+  const months: Record<string, number> = {};
+  for (const [key, occurrences] of Object.entries(monthOccurrences)) {
+    months[key] = occurrences[occurrences.length - 1]; // last occurrence wins
+  }
 
-    // Allotment status
-    if (
-      mapping.allotmentStatus === undefined &&
-      (n.includes("allotment") || n.includes("status"))
-    )
-      mapping.allotmentStatus = idx;
-
-    // Total received
-    if (
-      mapping.totalReceived === undefined &&
-      n.includes("total") &&
-      (n.includes("received") || n.includes("recv"))
-    )
-      mapping.totalReceived = idx;
-
-    // Remaining / balance
-    if (
-      mapping.remaining === undefined &&
-      (n.includes("remaining") || n.includes("balance"))
-    )
-      mapping.remaining = idx;
-
-    // Month columns
-    const monthKey = MONTH_ALIASES[header?.toString().trim().toLowerCase()];
-    if (monthKey && mapping[`month_${monthKey}`] === undefined)
-      mapping[`month_${monthKey}`] = idx;
-  });
-
-  return mapping;
+  return {
+    srNo: srNoIdx,
+    name: nameIdx,
+    plotBlock: plotBlockIdx,
+    mc: mcIdx,
+    allotment: allotmentIdx !== -1 ? allotmentIdx : null,
+    months,
+  };
 }
+
+// ── Block tracker (inlined from blockHelpers) ─────────────────────────────────
+
+const VALID_BLOCK_LETTERS = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZ".split(""));
 
 /**
- * Determines whether a row should be skipped entirely.
- * Skips: empty rows, summary rows (total/balance), and pure "Block X" headers
- * that have NO numeric plot number — those still update the blockTracker
- * but should not produce a data record.
- *
- * NOTE: We do NOT skip on the word "block" alone here because "374 A" style
- * rows are handled by blockTracker.resolve() which reads the block letter inline.
+ * Extracts the block letter explicitly stated in a cell value, or null if none.
+ *   "374 A"  → "A"
+ *   "374A"   → "A"
+ *   "Block A"→ "A"
+ *   "374"    → null  (plain number — block must be inherited)
  */
-function shouldSkipRow(plotBlockRaw: string): boolean {
-  if (!plotBlockRaw) return true;
+function extractBlock(raw: string): string | null {
+  const s = raw.trim();
 
-  const lower = plotBlockRaw.toLowerCase().trim();
+  // "374 A" or "374A" — number then optional space then single letter
+  const m1 = s.match(/^(\d+)\s*([A-Za-z])$/);
+  if (m1) {
+    const b = m1[2].toUpperCase();
+    return VALID_BLOCK_LETTERS.has(b) ? b : null;
+  }
 
-  // Skip blank
-  if (lower === "") return true;
+  // "Block A" section header
+  const m2 = s.match(/^[Bb]lock\s+([A-Za-z])$/);
+  if (m2) {
+    const b = m2[1].toUpperCase();
+    return VALID_BLOCK_LETTERS.has(b) ? b : null;
+  }
 
-  // Skip pure section headers like "Block A", "BLOCK B"
-  // (these update the tracker in the caller but don't produce records)
-  if (isBlockHeaderRow(plotBlockRaw)) return true;
+  return null;
+}
 
-  // Skip summary/footer rows
-  if (
-    lower.includes("total") ||
-    lower.includes("balance") ||
-    lower.includes("remaining") ||
-    lower === "plot" ||
-    lower === "plot no" ||
-    lower === "plot no."
-  )
-    return true;
+/** Extracts the numeric plot number from "374 A", "374", "374A" → "374" */
+function extractPlotNumber(raw: string): string | null {
+  const m = raw.trim().match(/^(\d+)/);
+  return m ? m[1] : null;
+}
 
-  // Row must start with a digit to be a valid plot row
-  if (!/^\d/.test(lower)) return true;
+/** True for pure section header rows like "Block A" — not a data row */
+function isBlockHeaderRow(raw: string): boolean {
+  return /^[Bb]lock\s+[A-Za-z]+$/.test(raw.trim());
+}
 
-  return false;
+/** Creates a stateful block tracker. Call resolve() for every data row. */
+function createBlockTracker() {
+  let currentBlock = "";
+  return {
+    resolve(raw: string): { plotNumber: string | null; block: string } {
+      const block = extractBlock(raw);
+      if (block) currentBlock = block;
+      return { plotNumber: extractPlotNumber(raw), block: currentBlock };
+    },
+    reset() {
+      currentBlock = "";
+    },
+  };
+}
+
+// ── Allotment status ──────────────────────────────────────────────────────────
+
+function parseAllotmentStatus(
+  raw: any,
+): "Active" | "Cancelled" | "Unsold" | "Unknown" {
+  if (raw === null || raw === undefined || raw === "") return "Active";
+  const s = String(raw).trim().toLowerCase();
+  if (s === "yes" || s === "active") return "Active";
+  if (s.includes("cancel")) return "Cancelled";
+  if (s.includes("unsold")) return "Unsold";
+  if (!isNaN(Number(s))) return "Active"; // numeric carry-over values
+  return "Unknown";
 }
 
 // ── Main parser ───────────────────────────────────────────────────────────────
 
 export function parseExcelFile(filePath: string): ParsedPlotData[] {
-  const workbook = XLSX.readFile(filePath);
+  const workbook = XLSX.readFile(filePath, { raw: true });
   const allParsedData: ParsedPlotData[] = [];
 
   for (const sheetName of workbook.SheetNames) {
-    const year = findYearFromSheetName(sheetName);
-    if (!year) {
-      console.log(`⚠️  Skipping sheet "${sheetName}" — no year detected`);
+    // Derive year from sheet name (handles "2012", "M.C2013", "Maintanance Expense 2025", etc.)
+    const yearMatch = sheetName.match(/(\d{4})/);
+    if (!yearMatch) {
+      console.log(`⚠️  Skipping sheet "${sheetName}" — no 4-digit year found`);
       continue;
     }
+    const year = parseInt(yearMatch[1], 10);
+    const defaultMcRate = MC_RATE_BY_YEAR?.[year] ?? DEFAULT_MC_RATE;
 
-    console.log(`\n📄 Parsing sheet "${sheetName}" for year ${year}...`);
+    console.log(`\n📄 Parsing sheet "${sheetName}" → year ${year}...`);
 
     const sheet = workbook.Sheets[sheetName];
-    const data: any[][] = XLSX.utils.sheet_to_json(sheet, {
+    const rows: any[][] = XLSX.utils.sheet_to_json(sheet, {
       header: 1,
       defval: null,
+      blankrows: false,
+      raw: true,
     });
 
-    if (data.length < 2) {
-      console.log(`   ⚠️  Sheet is empty or has no data rows`);
+    if (rows.length < 2) {
+      console.warn(`   ⚠️  Sheet "${sheetName}" has too few rows, skipping.`);
       continue;
     }
 
-    // ── Find header row (scan first 10 rows) ──────────────────────────────
-    let headerRowIdx = 0;
-    for (let i = 0; i < Math.min(10, data.length); i++) {
-      const row = data[i];
-      if (!row) continue;
-      const hasHeader = row.some((cell: any) => {
-        const s = cell?.toString().trim().toLowerCase() || "";
-        return (
-          s === "sr" ||
-          s === "sr." ||
-          s === "sr no" ||
-          s === "sr#" ||
-          s.includes("name") ||
-          s.includes("owner") ||
-          s.includes("plot")
-        );
-      });
-      if (hasHeader) {
-        headerRowIdx = i;
-        break;
-      }
-    }
-
-    const headers = (data[headerRowIdx] || []).map(
-      (h: any) => h?.toString() || "",
-    );
-    const columnMap = findColumnMapping(headers);
-    const defaultMcRate = MC_RATE_BY_YEAR[year] || DEFAULT_MC_RATE;
-
-    // Debug log — helps diagnose mapping issues
-    console.log(`   📌 Header row index: ${headerRowIdx}`);
-    console.log(`   📌 Headers: ${JSON.stringify(headers)}`);
-    console.log(`   📌 Column map: ${JSON.stringify(columnMap)}`);
-
-    if (columnMap.plotBlock === undefined) {
+    // Header row is always index 1 (row 0 = title like "KKB4 MAINTENANCE - 2012")
+    const colMap = detectColumns(rows[1]);
+    if (!colMap) {
       console.warn(
-        `   ⚠️  Could not find plot/block column in sheet "${sheetName}" — skipping`,
+        `   ⚠️  Could not detect required columns in "${sheetName}". Headers: ${JSON.stringify(rows[1])}`,
       );
       continue;
     }
 
-    // ── One tracker per sheet — resets block state between sheets ─────────
-    const blockTracker = createBlockTracker();
+    console.log(
+      `   📌 Columns → srNo:${colMap.srNo} name:${colMap.name} plotBlock:${colMap.plotBlock} mc:${colMap.mc} allotment:${colMap.allotment}`,
+    );
+    console.log(`   📌 Months  → ${JSON.stringify(colMap.months)}`);
 
+    // Fresh block tracker per sheet
+    const blockTracker = createBlockTracker();
     let parsedCount = 0;
     let skippedCount = 0;
 
-    for (let i = headerRowIdx + 1; i < data.length; i++) {
-      const row = data[i];
-      if (!row || row.every((c: any) => c === null || c === "")) continue;
+    // Data rows start at index 2
+    for (let i = 2; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || row.every((c) => c === null || c === "")) continue;
 
-      const plotBlockRaw = row[columnMap.plotBlock]?.toString().trim() ?? "";
+      const rawPB = String(row[colMap.plotBlock] ?? "").trim();
 
-      // Always feed into tracker so block letter propagates — even for
-      // "Block A" header rows that we skip for data output
-      if (plotBlockRaw) {
-        const embeddedBlock = extractBlockFromPlotStr(plotBlockRaw);
-        if (embeddedBlock) {
-          // Pre-update tracker for header rows before the skip check
-          blockTracker.resolve(plotBlockRaw);
-        }
-      }
+      // Always feed into the tracker to keep block carry-forward alive
+      // (even for rows we will skip for data output)
+      blockTracker.resolve(rawPB);
 
-      if (shouldSkipRow(plotBlockRaw)) {
+      // Skip blank plotBlock
+      if (!rawPB) {
         skippedCount++;
         continue;
       }
 
-      // Resolve plot number + block (block inherited if not in this cell)
-      const { plotNumber, block } = blockTracker.resolve(plotBlockRaw);
-
-      if (!plotNumber) {
+      // Skip "Block A" section header rows (they only update the tracker)
+      if (isBlockHeaderRow(rawPB)) {
         skippedCount++;
         continue;
       }
 
-      // Skip rows where block is still empty (no block seen yet in sheet)
-      if (!block) {
-        console.warn(
-          `   ⚠️  Row ${i}: plotNumber="${plotNumber}" has no block — skipping`,
-        );
+      // Must start with a digit to be a valid plot row
+      if (!/^\d/.test(rawPB)) {
         skippedCount++;
         continue;
       }
 
-      // ── Owner name ──────────────────────────────────────────────────────
-      const ownerName =
-        columnMap.ownerName !== undefined
-          ? row[columnMap.ownerName]?.toString().trim() || "Unknown"
-          : "Unknown";
+      // srNo must be a positive integer
+      const rawSr = row[colMap.srNo];
+      if (rawSr === null || rawSr === undefined) {
+        skippedCount++;
+        continue;
+      }
+      const srNo = parseInt(String(rawSr), 10);
+      if (isNaN(srNo) || srNo <= 0) {
+        skippedCount++;
+        continue;
+      }
 
-      // ── Sr No ───────────────────────────────────────────────────────────
-      const srNo =
-        columnMap.srNo !== undefined ? parseInt(row[columnMap.srNo]) || i : i;
+      // Resolve plot number + block.
+      // blockTracker.resolve() was already called above to keep carry-forward
+      // state alive — calling it again here is safe because it is idempotent
+      // (same input → same block state update).
+      const { plotNumber: resolvedPlotNumber, block: resolvedBlock } =
+        blockTracker.resolve(rawPB);
 
-      // ── MC Rate ─────────────────────────────────────────────────────────
+      if (!resolvedPlotNumber || !resolvedBlock) {
+        skippedCount++;
+        continue;
+      }
+
+      // Owner name
+      const ownerName = String(row[colMap.name] ?? "").trim() || "Unknown";
+
+      // MC rate
       let mcRate = defaultMcRate;
-      if (columnMap.mcRate !== undefined) {
-        const rateVal = parseInt(row[columnMap.mcRate]);
-        if (!isNaN(rateVal) && rateVal > 0) mcRate = rateVal;
+      const rawMc = row[colMap.mc];
+      if (rawMc !== null && rawMc !== undefined) {
+        const parsedMc = parseInt(String(rawMc), 10);
+        if (!isNaN(parsedMc) && parsedMc > 0) mcRate = parsedMc;
       }
 
-      // ── Allotment status ────────────────────────────────────────────────
-      let allotmentStatus = "Active";
-      if (columnMap.allotmentStatus !== undefined) {
-        const statusVal =
-          row[columnMap.allotmentStatus]?.toString().trim().toLowerCase() || "";
-        if (statusVal.includes("cancel")) allotmentStatus = "Cancelled";
-        else if (statusVal.includes("unsold")) allotmentStatus = "Unsold";
-        else if (statusVal === "yes" || statusVal === "active")
-          allotmentStatus = "Active";
-      }
+      // Allotment status
+      const rawAllotment =
+        colMap.allotment !== null ? row[colMap.allotment] : null;
+      const allotmentStatus = parseAllotmentStatus(rawAllotment);
 
-      // ── Monthly payments ────────────────────────────────────────────────
+      // Monthly payments
       const payments: Record<string, number | null> = {};
       for (const month of MONTHS) {
-        const colIdx = columnMap[`month_${month}`];
+        const colIdx = colMap.months[month];
         if (colIdx !== undefined) {
           const val = row[colIdx];
-          payments[month] =
-            val !== undefined &&
-            val !== null &&
-            val !== "" &&
-            !isNaN(Number(val))
-              ? Number(val)
-              : null;
+          const n =
+            val !== null && val !== undefined && val !== "" ? Number(val) : NaN;
+          payments[month] = isNaN(n) ? null : n;
         } else {
           payments[month] = null;
         }
@@ -374,23 +356,22 @@ export function parseExcelFile(filePath: string): ParsedPlotData[] {
       allParsedData.push({
         srNo,
         ownerName,
-        plotNumber,
-        block,
-        plotBlock: `${plotNumber} ${block}`,
+        plotNumber: resolvedPlotNumber,
+        block: resolvedBlock,
+        plotBlock: `${resolvedPlotNumber} ${resolvedBlock}`,
         allotmentStatus,
         mcRate,
         payments,
         year,
       });
-
       parsedCount++;
     }
 
     console.log(
-      `   ✅ Parsed ${parsedCount} rows | Skipped ${skippedCount} rows from year ${year}`,
+      `   ✅ Parsed ${parsedCount} rows | Skipped ${skippedCount} rows`,
     );
   }
 
-  console.log(`\n📊 Grand total parsed records: ${allParsedData.length}`);
+  console.log(`\n📊 Grand total parsed: ${allParsedData.length} records`);
   return allParsedData;
 }
