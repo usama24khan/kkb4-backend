@@ -151,3 +151,79 @@ export const deletePayment = async (req: AuthRequest, res: Response): Promise<vo
     sendError(res, 'Failed to delete payment', 500, error.message);
   }
 };
+
+/**
+ * POST /payments/:paymentId/void
+ * Body: { month: 'jan'..'dec', reason?: string }
+ *
+ * Soft-deletes the recorded amount for one month. The amount is preserved in
+ * the payment's `voidedEntries` so it can be restored later via /restore.
+ */
+export const voidPaymentMonth = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { paymentId } = req.params;
+    const { month, reason } = req.body || {};
+    if (!month) {
+      sendError(res, 'month is required', 400);
+      return;
+    }
+
+    const result = await PaymentService.voidMonth(paymentId, month, req.admin?.id, reason);
+    if (!result) {
+      sendError(res, 'Nothing to void (no payment / invalid month / month already empty)', 404);
+      return;
+    }
+
+    if (req.admin) {
+      await AuditLog.create({
+        admin: req.admin.id,
+        action: 'void',
+        entity: 'payment',
+        entityId: paymentId,
+        changes: { month, voidedAmount: result.voidedAmount, reason: reason || '' },
+      });
+    }
+
+    sendSuccess(res, result.payment, `${month} voided (PKR ${result.voidedAmount})`);
+  } catch (error: any) {
+    sendError(res, 'Failed to void payment', 500, error.message);
+  }
+};
+
+/**
+ * POST /payments/:paymentId/restore
+ * Body: { month: 'jan'..'dec' }
+ *
+ * Restores the most-recent unrestored void for a month. Idempotent across
+ * historical voids — calling restore twice picks up the next-oldest void.
+ */
+export const restorePaymentMonth = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { paymentId } = req.params;
+    const { month } = req.body || {};
+    if (!month) {
+      sendError(res, 'month is required', 400);
+      return;
+    }
+
+    const result = await PaymentService.restoreMonth(paymentId, month, req.admin?.id);
+    if (!result) {
+      sendError(res, 'Nothing to restore for this month', 404);
+      return;
+    }
+
+    if (req.admin) {
+      await AuditLog.create({
+        admin: req.admin.id,
+        action: 'restore',
+        entity: 'payment',
+        entityId: paymentId,
+        changes: { month, restoredAmount: result.restoredAmount },
+      });
+    }
+
+    sendSuccess(res, result.payment, `${month} restored (PKR ${result.restoredAmount})`);
+  } catch (error: any) {
+    sendError(res, 'Failed to restore payment', 500, error.message);
+  }
+};

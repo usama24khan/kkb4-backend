@@ -8,6 +8,7 @@ import routes from "./routes";
 import { errorHandler } from "./middleware/errorHandler";
 import { generalLimiter } from "./middleware/rateLimiter";
 import { ensureDefaultAdmin } from "./controllers/auth.controller";
+import { urduPipelineHealth } from "./utils/pdfGenerator";
 
 const app = express();
 
@@ -41,6 +42,19 @@ const startServer = async () => {
     console.log(`🚀 KKB4 API running on http://localhost:${env.PORT}`);
     console.log(`📋 Environment: ${env.NODE_ENV}`);
   });
+  // Fire-and-log Urdu pipeline check (non-blocking). The admin sees the result
+  // in the server log so a misconfigured Urdu setup is obvious on boot rather
+  // than only at the moment they try to generate a notice.
+  urduPipelineHealth()
+    .then(({ ok, status }) => {
+      const tag = ok ? "✅" : "⚠️";
+      console.log(`${tag} Urdu PDF pipeline: ${ok ? "ready" : "NOT READY"} — ${status}`);
+      if (!ok) {
+        console.log("   Run: pip install reportlab arabic-reshaper python-bidi");
+        console.log("   And place NotoNastaliqUrdu-Regular.ttf in backend/scripts/");
+      }
+    })
+    .catch((err) => console.warn("⚠️  Urdu pipeline check failed:", err));
 };
 
 startServer().catch(console.error);

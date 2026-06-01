@@ -11,6 +11,9 @@ export interface IPlot extends Document {
   plotCode: string;
   allotmentStatus: 'Active' | 'Cancelled' | 'Unsold' | 'Unknown';
   isActive: boolean;
+  ownerPhone?: string;
+  ownerCnic?: string;
+  monthlyChargeOverride?: number | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -35,6 +38,9 @@ const PlotSchema = new Schema<IPlot>(
       default: 'Active',
     },
     isActive: { type: Boolean, default: true },
+    ownerPhone: { type: String, trim: true, default: '' },
+    ownerCnic: { type: String, trim: true, default: '' },
+    monthlyChargeOverride: { type: Number, default: null },
   },
   {
     timestamps: true,

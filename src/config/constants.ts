@@ -2,40 +2,38 @@
  * KKB4 Maintenance System — Constants & Configuration
  *
  * Phase Logic (derive `phase` from block):
- *   Phase 1: Blocks K, L
- *   Phase 2: Blocks I, J
- *   Phase 3: Blocks G, H
- *   Phase 4: Blocks E, F
- *   Phase 5: Blocks C, D
- *   Phase 6: Blocks A, B
- *   Phase P: Block P
+ *   Phase 1: Blocks A, B, H, I, J, K
+ *   Phase 2: Blocks C, D, E, F, G
+ *   Phase 3: Block  L
+ *   Phase P: Block  P   (legacy / standalone — not part of the main 1-3 split)
+ *
+ * NOTE: This mapping was changed from the original 6-phase scheme. Existing
+ * Plot records still carry their old `phase` value until the migration
+ * script runs (`npm run migrate:phases`).
  */
 
 // ── Phase Configuration ──────────────────────────────────────────────────────
 
 export const PHASE_BLOCK_MAP: Record<string, string[]> = {
-  "Phase 1": ["K", "L"],
-  "Phase 2": ["I", "J"],
-  "Phase 3": ["G", "H"],
-  "Phase 4": ["E", "F"],
-  "Phase 5": ["C", "D"],
-  "Phase 6": ["A", "B"],
+  "Phase 1": ["A", "B", "H", "I", "J", "K"],
+  "Phase 2": ["C", "D", "E", "F", "G"],
+  "Phase 3": ["L"],
   "Phase P": ["P"],
 };
 
 export const BLOCK_PHASE_MAP: Record<string, string> = {
+  A: "Phase 1",
+  B: "Phase 1",
+  H: "Phase 1",
+  I: "Phase 1",
+  J: "Phase 1",
   K: "Phase 1",
-  L: "Phase 1",
-  I: "Phase 2",
-  J: "Phase 2",
-  G: "Phase 3",
-  H: "Phase 3",
-  E: "Phase 4",
-  F: "Phase 4",
-  C: "Phase 5",
-  D: "Phase 5",
-  A: "Phase 6",
-  B: "Phase 6",
+  C: "Phase 2",
+  D: "Phase 2",
+  E: "Phase 2",
+  F: "Phase 2",
+  G: "Phase 2",
+  L: "Phase 3",
   P: "Phase P",
 };
 
@@ -44,7 +42,7 @@ export const ALL_BLOCKS = [
 ];
 
 export const ALL_PHASES = [
-  "Phase 1", "Phase 2", "Phase 3", "Phase 4", "Phase 5", "Phase 6", "Phase P",
+  "Phase 1", "Phase 2", "Phase 3", "Phase P",
 ];
 
 // ── Month Configuration ──────────────────────────────────────────────────────

@@ -14,6 +14,9 @@ export const updatePlotSchema = z.object({
   block: z.string().min(1).max(1).toUpperCase().optional(),
   allotmentStatus: z.enum(['Active', 'Cancelled', 'Unsold', 'Unknown']).optional(),
   isActive: z.boolean().optional(),
+  ownerPhone: z.string().trim().optional(),
+  ownerCnic: z.string().trim().optional(),
+  monthlyChargeOverride: z.number().nullable().optional(),
 });
 
 export type CreatePlotInput = z.infer<typeof createPlotSchema>;

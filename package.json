@@ -8,9 +8,15 @@
     "build:dev": "tsc",
     "build:prod": "tsc",
     "start": "NODE_ENV=production node dist/app.js",
-    "seed": "NODE_ENV=development ts-node src/scripts/seedFromExcel.ts"
+    "seed": "NODE_ENV=development ts-node src/scripts/seedFromExcel.ts",
+    "migrate:phases": "NODE_ENV=development ts-node src/scripts/migratePhases.ts",
+    "migrate:phases:dry": "NODE_ENV=development ts-node src/scripts/migratePhases.ts --dry",
+    "setup:urdu": "python3 -m venv .venv && .venv/bin/pip install --upgrade pip fpdf2 uharfbuzz fonttools && .venv/bin/python scripts/generate_urdu_notice.py --self-test",
+    "test:urdu": ".venv/bin/python scripts/generate_urdu_notice.py --self-test"
   },
   "dependencies": {
+    "@fontsource/noto-naskh-arabic": "^5.2.11",
+    "@fontsource/noto-nastaliq-urdu": "^5.2.8",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

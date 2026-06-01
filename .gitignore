@@ -8,3 +8,8 @@ notices/
 # env files
 .env*
 !.env.example
+
+# Python venv for Urdu PDF generator (run `npm run setup:urdu` to recreate)
+.venv/
+__pycache__/
+*.pyc

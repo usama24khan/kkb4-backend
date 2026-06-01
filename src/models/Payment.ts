@@ -15,6 +15,21 @@ export interface IPaymentMonths {
   dec: number | null;
 }
 
+/**
+ * A single voided payment entry. When a month is voided, we copy the cleared
+ * amount here so the admin can restore it later if the void was a mistake.
+ */
+export interface IVoidedEntry {
+  month: string;
+  amount: number;
+  voidedAt: Date;
+  voidedBy?: Types.ObjectId | null;
+  reason?: string;
+  restored: boolean;
+  restoredAt?: Date | null;
+  restoredBy?: Types.ObjectId | null;
+}
+
 export interface IPayment extends Document {
   plot: Types.ObjectId;
   year: number;
@@ -24,6 +39,7 @@ export interface IPayment extends Document {
   totalDue: number;
   remaining: number;
   note: string;
+  voidedEntries: IVoidedEntry[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -51,6 +67,24 @@ const PaymentSchema = new Schema<IPayment>(
     totalDue: { type: Number, default: 0 },
     remaining: { type: Number, default: 0 },
     note: { type: String, default: '' },
+    voidedEntries: {
+      type: [
+        new Schema<IVoidedEntry>(
+          {
+            month: { type: String, required: true },
+            amount: { type: Number, required: true },
+            voidedAt: { type: Date, default: () => new Date() },
+            voidedBy: { type: Schema.Types.ObjectId, ref: 'Admin', default: null },
+            reason: { type: String, default: '' },
+            restored: { type: Boolean, default: false },
+            restoredAt: { type: Date, default: null },
+            restoredBy: { type: Schema.Types.ObjectId, ref: 'Admin', default: null },
+          },
+          { _id: true, timestamps: false },
+        ),
+      ],
+      default: [],
+    },
   },
   {
     timestamps: true,

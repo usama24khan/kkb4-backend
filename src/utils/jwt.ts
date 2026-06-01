@@ -5,6 +5,8 @@ interface TokenPayload {
   id: string;
   email: string;
   role: string;
+  // Present only on resident tokens — the plot the resident is bound to.
+  plotId?: string;
 }
 
 export const generateAccessToken = (payload: TokenPayload): string => {
