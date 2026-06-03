@@ -4,6 +4,12 @@ import { StatsService } from '../services/stats.service';
 import { ALL_BLOCKS, BLOCK_PHASE_MAP, getMcRateForYear } from '../config/constants';
 import { sendSuccess, sendError } from '../utils/responseHelper';
 import Payment from '../models/Payment';
+import Block from '../models/Block';
+import Phase from '../models/Phase';
+import AuditLog from '../models/AuditLog';
+import { createBlockSchema } from '../validations/structure.validation';
+import { phaseExists } from '../utils/blockRegistry';
+import { AuthRequest } from '../middleware/auth.middleware';
 
 export const getAllBlocks = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -52,6 +58,67 @@ export const getBlockDetail = async (req: Request, res: Response): Promise<void>
     sendSuccess(res, { plots: plotsWithPayments, stats }, 'Block detail fetched');
   } catch (error: any) {
     sendError(res, 'Failed to fetch block detail', 500, error.message);
+  }
+};
+
+/**
+ * POST /api/blocks — register a new block linked to a phase.
+ *
+ * "Ensure exists" semantics: a block that already exists (built-in constant or
+ * already saved) is returned with 200. If the target phase does not yet exist,
+ * it is auto-created so the admin can define a brand-new phase + block in one
+ * step.
+ */
+export const createBlock = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const validation = createBlockSchema.safeParse(req.body);
+    if (!validation.success) {
+      sendError(res, 'Validation failed', 400, validation.error.message);
+      return;
+    }
+
+    const { code, phase } = validation.data;
+
+    // Built-in constant block — nothing to persist, return its fixed mapping.
+    if (BLOCK_PHASE_MAP[code]) {
+      sendSuccess(
+        res,
+        { code, phase: BLOCK_PHASE_MAP[code], isActive: true, builtIn: true },
+        'Block already exists (built-in)'
+      );
+      return;
+    }
+
+    const existing = await Block.findOne({ code });
+    if (existing) {
+      sendSuccess(res, existing, 'Block already exists');
+      return;
+    }
+
+    // Auto-register the phase if it is brand new (not a constant, not in DB).
+    if (!(await phaseExists(phase))) {
+      await Phase.create({ name: phase });
+    }
+
+    const block = await Block.create({ code, phase });
+
+    if (req.admin) {
+      await AuditLog.create({
+        admin: req.admin.id,
+        action: 'create',
+        entity: 'block',
+        entityId: block._id.toString(),
+        changes: { code, phase },
+      });
+    }
+
+    sendSuccess(res, block, 'Block created', 201);
+  } catch (error: any) {
+    if (error.code === 11000) {
+      sendError(res, 'Block already exists', 409);
+      return;
+    }
+    sendError(res, 'Failed to create block', 500, error.message);
   }
 };
 

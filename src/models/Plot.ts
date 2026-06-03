@@ -47,10 +47,15 @@ const PlotSchema = new Schema<IPlot>(
   }
 );
 
-// Derive phase, plotBlock, and plotCode before saving
+// Derive phase, plotBlock, and plotCode before saving.
+// For the built-in constant blocks the phase is authoritative and always
+// re-derived from BLOCK_PHASE_MAP. For DB-backed (custom) blocks the constant
+// map has no entry, so we keep whatever `phase` the service resolved via the
+// block registry instead of clobbering it with ''.
 PlotSchema.pre('save', function (next) {
   if (this.block) {
-    this.phase = BLOCK_PHASE_MAP[this.block.toUpperCase()] || '';
+    const mapped = BLOCK_PHASE_MAP[this.block.toUpperCase()];
+    if (mapped) this.phase = mapped;
   }
   this.plotBlock = `${this.plotNumber} ${this.block}`.trim();
   this.plotCode = `${this.plotNumber}-${this.block}`.trim();
@@ -60,7 +65,8 @@ PlotSchema.pre('save', function (next) {
 PlotSchema.pre('findOneAndUpdate', function (next) {
   const update = this.getUpdate() as any;
   if (update?.block) {
-    update.phase = BLOCK_PHASE_MAP[update.block.toUpperCase()] || '';
+    const mapped = BLOCK_PHASE_MAP[update.block.toUpperCase()];
+    if (mapped) update.phase = mapped;
   }
   if (update?.plotNumber || update?.block) {
     const plotNum = update.plotNumber || '';

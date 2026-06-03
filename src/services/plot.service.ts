@@ -1,6 +1,7 @@
 import Plot, { IPlot } from '../models/Plot';
 import Payment from '../models/Payment';
 import { BLOCK_PHASE_MAP, PHASE_BLOCK_MAP } from '../config/constants';
+import { resolvePhaseForBlock } from '../utils/blockRegistry';
 
 interface PlotQuery {
   block?: string;
@@ -62,6 +63,13 @@ export class PlotService {
   }
 
   static async create(data: Partial<IPlot>) {
+    // Resolve phase from the block registry (constants ∪ DB) unless one was
+    // explicitly provided. The pre-save hook keeps this value for custom
+    // (DB-backed) blocks and re-derives it for built-in constant blocks.
+    const blockCode = (data.block || '').toString().toUpperCase();
+    if (!data.phase && blockCode) {
+      data.phase = await resolvePhaseForBlock(blockCode);
+    }
     const plot = new Plot(data);
     return plot.save();
   }
