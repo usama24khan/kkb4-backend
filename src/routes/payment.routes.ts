@@ -4,6 +4,7 @@ import {
   getPaymentsByPlot,
   updatePayment,
   bulkUpdatePayments,
+  bulkUpdateAllMonths,
   createOrUpdatePayment,
   deletePayment,
   voidPaymentMonth,
@@ -19,6 +20,7 @@ router.get('/plot/:plotId', getPaymentsByPlot);
 router.put('/:paymentId', authMiddleware, adminOnly, updatePayment);
 router.delete('/:paymentId', authMiddleware, adminOnly, deletePayment);
 router.post('/bulk', authMiddleware, adminOnly, bulkUpdatePayments);
+router.post('/bulk-all', authMiddleware, adminOnly, bulkUpdateAllMonths);
 router.post('/:paymentId/void', authMiddleware, adminOnly, voidPaymentMonth);
 router.post('/:paymentId/restore', authMiddleware, adminOnly, restorePaymentMonth);
 router.post('/', authMiddleware, adminOnly, createOrUpdatePayment);

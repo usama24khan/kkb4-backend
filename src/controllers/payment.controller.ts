@@ -100,6 +100,38 @@ export const bulkUpdatePayments = async (req: AuthRequest, res: Response): Promi
   }
 };
 
+/**
+ * POST /payments/bulk-all
+ * Body: { block?, year, entries: [{ plotId, payments: { jan..dec } }] }
+ *
+ * Saves the full month map for many plots at once (the "All months" grid).
+ */
+export const bulkUpdateAllMonths = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { year, entries, block } = req.body || {};
+    if (!year || !Array.isArray(entries) || entries.length === 0) {
+      sendError(res, 'year and a non-empty entries[] are required', 400);
+      return;
+    }
+
+    const results = await PaymentService.bulkUpsertMonths(entries, parseInt(year));
+
+    if (req.admin) {
+      await AuditLog.create({
+        admin: req.admin.id,
+        action: 'bulk_update',
+        entity: 'payment',
+        entityId: `${block || 'multi'}_${year}_all`,
+        changes: { entriesCount: entries.length, scope: 'all-months' },
+      });
+    }
+
+    sendSuccess(res, results, `${results.length} payments updated`);
+  } catch (error: any) {
+    sendError(res, 'Failed to bulk update payments', 500, error.message);
+  }
+};
+
 export const createOrUpdatePayment = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { plotId, year } = req.body;

@@ -217,6 +217,43 @@ export class PaymentService {
     return results;
   }
 
+  /**
+   * Bulk-upsert the full month map for many plots in a single year. Each entry
+   * carries a partial `payments` object; only the months present are written
+   * (an explicit null clears a month). Used by the "All months" grid editor.
+   */
+  static async bulkUpsertMonths(
+    entries: Array<{ plotId: string; payments: Record<string, number | null> }>,
+    year: number,
+  ) {
+    const results = [];
+    const defaultRate = getMcRateForYear(year);
+
+    for (const entry of entries) {
+      let payment = await Payment.findOne({ plot: entry.plotId, year });
+      if (!payment) {
+        payment = new Payment({
+          plot: entry.plotId,
+          year,
+          mcRate: defaultRate,
+          payments: {},
+        });
+      }
+
+      for (const m of MONTHS) {
+        const v = (entry.payments || {})[m];
+        if (v === undefined) continue;
+        (payment.payments as any)[m] =
+          v === null || (v as any) === '' ? null : Number(v) || 0;
+      }
+
+      recalcTotals(payment);
+      results.push(await payment.save());
+    }
+
+    return results;
+  }
+
   static async getPaymentsByBlock(block: string, year: number) {
     const plots = await Plot.find({ block: block.toUpperCase(), isActive: true }).lean();
     const plotIds = plots.map(p => p._id);

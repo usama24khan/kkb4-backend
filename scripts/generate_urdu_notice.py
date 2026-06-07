@@ -513,6 +513,17 @@ def render(payload: dict, font_path: Path) -> str:
     sig_w = 72
     sig_x = pdf.right_x() - sig_w
 
+    # Signature image just above the rule, centered in the signature column.
+    sig_path = payload.get("signaturePath")
+    if sig_path:
+        img_w = 30  # mm
+        img_h = img_w * (414 / 603)
+        try:
+            pdf.image(sig_path, x=sig_x + (sig_w - img_w) / 2,
+                      y=sig_y - img_h - 1, w=img_w)
+        except Exception:
+            pass
+
     # Signature rule
     pdf.set_draw_color(*DARK)
     pdf.set_line_width(0.3)
@@ -554,6 +565,7 @@ def run_self_test() -> int:
             {"year": 2026, "mcRate": 400, "unpaidMonths": ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"], "amountDue": 4800},
         ],
         "grandTotal": 8800,
+        "signaturePath": str(Path(__file__).resolve().parent.parent / "signature" / "signature.png"),
     }
     try:
         font = find_urdu_font()

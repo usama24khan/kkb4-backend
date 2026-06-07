@@ -58,6 +58,11 @@ if (!fs.existsSync(NOTICES_DIR)) {
  */
 const PYTHON_SCRIPT = path.join(__dirname, '../../scripts/generate_urdu_notice.py');
 
+// Society signature image (shared with the receipt generator). Optional — if
+// missing, the notice falls back to a plain signature line.
+const SIGNATURE_PATH = path.join(__dirname, '../../signature/signature.png');
+const SIGNATURE_RATIO = 414 / 603; // height / width of signature.png
+
 /**
  * Resolve the Python 3 interpreter to use.
  *
@@ -276,6 +281,24 @@ function renderEnglish(
   doc.text('Please deposit your maintenance fee at the KKB4 Society Office.');
   doc.text('Office Hours: Monday–Saturday, 9:00 AM – 5:00 PM');
   doc.moveDown(2);
+
+  // Signature image above the line (right-aligned), then the line + labels.
+  const sigRight = 545;
+  const imgW = 90;
+  const imgH = imgW * SIGNATURE_RATIO;
+  // Avoid overflowing the page bottom — start a new page if there isn't room.
+  if (doc.y + imgH + 40 > doc.page.height - 50) {
+    doc.addPage();
+  }
+  if (fs.existsSync(SIGNATURE_PATH)) {
+    try {
+      doc.image(SIGNATURE_PATH, sigRight - imgW, doc.y, { width: imgW });
+      doc.y += imgH + 2;
+    } catch {
+      /* corrupt/unsupported image — fall back to a plain line */
+    }
+  }
+  doc.fillColor('black').fontSize(10).font('Helvetica');
   doc.text('_________________________', 350, doc.y, { align: 'right' });
   doc.text('Secretary / Chairman', 350, doc.y + 5, { align: 'right' });
   doc.text('KKB4 Housing Society', 350, doc.y + 5, { align: 'right' });
@@ -337,6 +360,7 @@ async function generateUrduPDF(input: NoticeInput): Promise<NoticeResult> {
       amountDue:     b.amountDue,
     })),
     grandTotal,
+    signaturePath: fs.existsSync(SIGNATURE_PATH) ? SIGNATURE_PATH : '',
   };
 
   // Sanity-check the Python script is on disk before spawning. This catches the

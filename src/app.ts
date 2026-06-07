@@ -13,7 +13,7 @@ import { urduPipelineHealth } from "./utils/pdfGenerator";
 const app = express();
 
 // Ensure directories exist
-const dirs = ["uploads", "notices"];
+const dirs = ["uploads", "notices", "receipts"];
 for (const dir of dirs) {
   const dirPath = path.join(__dirname, "..", dir);
   if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
