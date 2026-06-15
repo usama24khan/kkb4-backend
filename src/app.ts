@@ -12,11 +12,18 @@ import { urduPipelineHealth } from "./utils/pdfGenerator";
 
 const app = express();
 
-// Ensure directories exist
-const dirs = ["uploads", "notices", "receipts"];
+// Ensure local scratch directories exist. Notices/receipts now stream to
+// Cloudinary (generated via os.tmpdir()), so only `uploads` is needed for
+// local dev. Wrapped in try/catch because the deployment FS is read-only on
+// platforms like Vercel — a failure here must not crash startup.
+const dirs = ["uploads"];
 for (const dir of dirs) {
   const dirPath = path.join(__dirname, "..", dir);
-  if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
+  try {
+    if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
+  } catch (err) {
+    console.warn(`⚠️  Could not create '${dir}' dir (read-only FS?):`, (err as Error).message);
+  }
 }
 
 // Middleware
@@ -24,9 +31,6 @@ app.use(cors({ origin: env.CORS_ORIGINS, credentials: true }));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(generalLimiter);
-
-// Static files for notices
-app.use("/notices", express.static(path.join(__dirname, "..", "notices")));
 
 // API Routes
 app.use("/api", routes);

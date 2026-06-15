@@ -33,6 +33,9 @@ export interface IReceipt extends Document {
   // Meta
   societyName: string;          // Default: "KKB Housing Society"
   isVerified: boolean;          // Admin-generated receipts default to true
+  // Full Cloudinary URL of the rendered PDF. Empty until the PDF is first
+  // generated (lazily, on the first /receipts/:id/pdf request) and cached.
+  filePath: string;
   generatedBy?: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -58,6 +61,7 @@ const ReceiptSchema = new Schema<IReceipt>(
 
     societyName: { type: String, default: "KKB Housing Society", trim: true },
     isVerified: { type: Boolean, default: true },
+    filePath: { type: String, default: "" }, // Cloudinary PDF URL (lazy cache)
     generatedBy: { type: Schema.Types.ObjectId, ref: "Admin", default: null },
   },
   {

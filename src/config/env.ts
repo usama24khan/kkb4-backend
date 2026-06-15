@@ -21,4 +21,20 @@ export const env = {
   CORS_ORIGINS: (
     process.env.CORS_ORIGINS || "http://localhost:3000,http://localhost:3001"
   ).split(","),
+
+  // ── Cloudinary (media/object storage) ─────────────────────────────────────
+  CLOUDINARY_CLOUD_NAME: process.env.CLOUDINARY_CLOUD_NAME || "",
+  CLOUDINARY_API_KEY: process.env.CLOUDINARY_API_KEY || "",
+  CLOUDINARY_API_SECRET: process.env.CLOUDINARY_API_SECRET || "",
+  // Optional top-level folder PDFs are stored under (e.g. "kkb4").
+  CLOUDINARY_FOLDER: process.env.CLOUDINARY_FOLDER || "",
+
+  // ── OTP email (Gmail via nodemailer) ──────────────────────────────────────
+  // Gmail account the OTP is sent FROM + a 16-char Gmail App Password.
+  EMAIL_FROM: process.env.EMAIL_FROM || "",
+  EMAIL_APP_PASSWORD: process.env.EMAIL_APP_PASSWORD || "",
+  // Inbox OTP codes are delivered TO. Defaults to ADMIN_EMAIL if unset, but
+  // ADMIN_EMAIL doubles as the admin login identity (which may not be a real
+  // mailbox), so set OTP_EMAIL explicitly to a deliverable address.
+  OTP_EMAIL: process.env.OTP_EMAIL || process.env.ADMIN_EMAIL || "admin@kkb4.com",
 };

@@ -6,8 +6,8 @@ import { generatePlotNotice, generateBulkNotices, computeBreakdown, type Payment
 import { sendSuccess, sendError } from '../utils/responseHelper';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { PHASE_BLOCK_MAP } from '../config/constants';
+import { getFromCloudinary } from '../lib/getFromCloudinary';
 import path from 'path';
-import fs from 'fs';
 
 const CURRENT_YEAR = new Date().getFullYear();
 
@@ -432,15 +432,78 @@ export const getNoticeHistory = async (req: Request, res: Response): Promise<voi
   }
 };
 
+/**
+ * GET /notices/:id/download
+ * Look up a notice by its MongoDB id and stream its PDF from Cloudinary back to
+ * the client as application/pdf. Notices generated for multiple plots have
+ * several PDFs (`pdfPaths`); `?index=N` selects which one (defaults to the
+ * first / `pdfPath`).
+ */
+export const downloadNoticeById = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const notice = await Notice.findById(req.params.id).lean();
+    if (!notice) {
+      sendError(res, 'Notice not found', 404);
+      return;
+    }
+
+    const idx = parseInt(req.query.index as string);
+    const candidates = (notice.pdfPaths && notice.pdfPaths.length
+      ? notice.pdfPaths
+      : [notice.pdfPath]).filter(Boolean);
+    const url = candidates[Number.isFinite(idx) ? idx : 0] || notice.pdfPath;
+
+    if (!url) {
+      sendError(res, 'No PDF associated with this notice', 404);
+      return;
+    }
+
+    const fileName = (url.split('/').pop() || `notice_${notice._id}.pdf`).split('?')[0];
+    const obj = await getFromCloudinary(url);
+
+    res.setHeader('Content-Type', obj.contentType || 'application/pdf');
+    if (obj.contentLength) res.setHeader('Content-Length', String(obj.contentLength));
+    res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
+    obj.body.pipe(res);
+    obj.body.on('error', () => {
+      if (!res.headersSent) sendError(res, 'Failed to stream notice PDF', 500);
+      else res.end();
+    });
+  } catch (error: any) {
+    // 404 from Cloudinary → the object is gone.
+    if (error?.statusCode === 404) {
+      sendError(res, 'Notice PDF not found in storage', 404);
+      return;
+    }
+    sendError(res, 'Failed to download notice', 500, error.message);
+  }
+};
+
+/**
+ * GET /notices/download/:fileName  (legacy)
+ * PDFs used to live on local disk under /notices; they now live in Cloudinary.
+ * This route is kept for backward compatibility: it matches the filename
+ * against a stored notice's URLs and 302-redirects to the public URL.
+ */
 export const downloadNotice = async (req: Request, res: Response): Promise<void> => {
   try {
     const { fileName } = req.params;
-    const filePath = path.join(__dirname, '../../notices', fileName);
-    if (!fs.existsSync(filePath)) {
+    const notice = await Notice.findOne({
+      $or: [
+        { pdfPath: { $regex: `${fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$` } },
+        { pdfPaths: { $regex: `${fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$` } },
+      ],
+    }).lean();
+
+    const url = notice
+      ? [notice.pdfPath, ...(notice.pdfPaths || [])].find((p) => p && p.endsWith(fileName))
+      : undefined;
+
+    if (!url) {
       sendError(res, 'File not found', 404);
       return;
     }
-    res.download(filePath);
+    res.redirect(url);
   } catch (error: any) {
     sendError(res, 'Failed to download', 500, error.message);
   }

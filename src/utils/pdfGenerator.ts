@@ -28,8 +28,10 @@ import { IPlot } from '../models/Plot';
 import { IPaymentMonths } from '../models/Payment';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { uploadToCloudinary } from '../lib/uploadToCloudinary';
 
 /**
  * Return the canonical phase for a plot using the current BLOCK_PHASE_MAP.
@@ -47,9 +49,33 @@ const execFileAsync = promisify(execFile);
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
-const NOTICES_DIR = path.join(__dirname, '../../notices');
-if (!fs.existsSync(NOTICES_DIR)) {
-  fs.mkdirSync(NOTICES_DIR, { recursive: true });
+/**
+ * Notice PDFs are generated into the OS temp dir (writable on Vercel, where the
+ * deployment FS is read-only), uploaded to Cloudinary, then deleted locally.
+ * `NOTICES_DIR` is the scratch space for both the PDF and the Urdu payload file.
+ */
+const NOTICES_DIR = os.tmpdir();
+
+/**
+ * Cloudinary storage key for notice PDFs. Final key looks like:
+ *   notices/2025/notice_12_374_A_2024-2025.pdf
+ */
+function noticeKey(fileName: string, yearLabel: string): string {
+  return `notices/${yearLabel}/${fileName}`;
+}
+
+/**
+ * Upload a freshly-generated notice PDF (sitting in the temp dir) to Cloudinary,
+ * delete the local temp copy, and return the public delivery URL. On upload
+ * failure the temp file is still cleaned up and the error propagates.
+ */
+async function uploadNoticeAndCleanup(tmpPath: string, yearLabel: string): Promise<string> {
+  try {
+    const url = await uploadToCloudinary(tmpPath, noticeKey(path.basename(tmpPath), yearLabel));
+    return url;
+  } finally {
+    fs.unlink(tmpPath, () => {});
+  }
 }
 
 /**
@@ -307,20 +333,27 @@ function renderEnglish(
 // ─── English PDF generator ───────────────────────────────────────────────────
 
 function generateEnglishPDF(input: NoticeInput): Promise<NoticeResult> {
-  return new Promise((resolve, reject) => {
-    const { plot, payments, yearFrom, yearTo, noticeNumber, paymentDeadline } = input;
-    const { breakdowns, grandTotal } = computeBreakdown(payments, yearFrom, yearTo);
-    const yearLabel = yearFrom === yearTo ? `${yearFrom}` : `${yearFrom}-${yearTo}`;
-    const fileName = `notice_${noticeNumber}_${plot.plotBlock.replace(/\s/g, '_')}_${yearLabel}.pdf`;
-    const filePath = path.join(NOTICES_DIR, fileName);
+  const { plot, payments, yearFrom, yearTo, noticeNumber, paymentDeadline } = input;
+  const { breakdowns, grandTotal } = computeBreakdown(payments, yearFrom, yearTo);
+  const yearLabel = yearFrom === yearTo ? `${yearFrom}` : `${yearFrom}-${yearTo}`;
+  const fileName = `notice_${noticeNumber}_${plot.plotBlock.replace(/\s/g, '_')}_${yearLabel}.pdf`;
+  const tmpPath = path.join(NOTICES_DIR, fileName);
 
+  // Render to the temp file first…
+  const renderToTmp = new Promise<void>((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', margin: 50 });
-    const stream = fs.createWriteStream(filePath);
+    const stream = fs.createWriteStream(tmpPath);
     doc.pipe(stream);
     renderEnglish(doc, plot, breakdowns, grandTotal, yearLabel, noticeNumber, paymentDeadline);
     doc.end();
-    stream.on('finish', () => resolve({ pdfPath: filePath, amountDue: grandTotal, breakdowns }));
+    stream.on('finish', () => resolve());
     stream.on('error', reject);
+  });
+
+  // …then upload to Cloudinary and clean up the temp file.
+  return renderToTmp.then(async () => {
+    const url = await uploadNoticeAndCleanup(tmpPath, yearLabel);
+    return { pdfPath: url, amountDue: grandTotal, breakdowns };
   });
 }
 
@@ -403,7 +436,9 @@ async function generateUrduPDF(input: NoticeInput): Promise<NoticeResult> {
       );
     }
 
-    return { pdfPath: outPath, amountDue: grandTotal, breakdowns };
+    // Upload the Python-rendered PDF to Cloudinary and remove the local temp copy.
+    const url = await uploadNoticeAndCleanup(outPath, yearLabel);
+    return { pdfPath: url, amountDue: grandTotal, breakdowns };
   } catch (err: any) {
     // Re-throw with the subprocess's stderr included — execFile's default
     // error message truncates it and the controller's 500 response becomes

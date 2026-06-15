@@ -4,6 +4,8 @@ import Plot from "../models/Plot";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { sendSuccess, sendError } from "../utils/responseHelper";
 import { generateReceiptPDF } from "../utils/receiptPdfGenerator";
+import { getFromCloudinary } from "../lib/getFromCloudinary";
+import { deleteFromCloudinary } from "../lib/deleteFromCloudinary";
 
 const CURRENT_YEAR = new Date().getFullYear();
 
@@ -130,9 +132,14 @@ export const getReceipt = async (req: Request, res: Response): Promise<void> => 
 };
 
 /**
- * GET /receipts/:id/pdf — generate and stream the receipt PDF.
+ * GET /receipts/:id/pdf — stream the receipt PDF from Cloudinary.
  * Public (no auth) so the admin UI can open it via window.open without
  * attaching the bearer token — mirrors the notice download endpoint.
+ *
+ * The PDF is generated and uploaded to Cloudinary lazily on the first request
+ * and the URL is cached on `receipt.filePath`; subsequent requests stream the
+ * cached object directly. Receipts are immutable (no edit endpoint), so the
+ * cache never goes stale.
  */
 export const generatePDF = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -141,15 +148,32 @@ export const generatePDF = async (req: Request, res: Response): Promise<void> =>
       sendError(res, "Receipt not found", 404);
       return;
     }
-    const { pdfPath, fileName } = await generateReceiptPDF(receipt);
-    res.download(pdfPath, fileName);
+
+    // Generate + upload on first request; cache the URL on the document.
+    if (!receipt.filePath) {
+      const { url } = await generateReceiptPDF(receipt);
+      receipt.filePath = url;
+      await receipt.save();
+    }
+
+    const fileName = `${receipt.receiptNumber || "receipt"}.pdf`;
+    const obj = await getFromCloudinary(receipt.filePath);
+
+    res.setHeader("Content-Type", obj.contentType || "application/pdf");
+    if (obj.contentLength) res.setHeader("Content-Length", String(obj.contentLength));
+    res.setHeader("Content-Disposition", `inline; filename="${fileName}"`);
+    obj.body.pipe(res);
+    obj.body.on("error", () => {
+      if (!res.headersSent) sendError(res, "Failed to stream receipt PDF", 500);
+      else res.end();
+    });
   } catch (error: any) {
     sendError(res, "Failed to generate receipt PDF", 500, error.message);
   }
 };
 
 /**
- * DELETE /receipts/:id — hard delete.
+ * DELETE /receipts/:id — hard delete (also removes the cached PDF from Cloudinary).
  */
 export const deleteReceipt = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -157,6 +181,12 @@ export const deleteReceipt = async (req: AuthRequest, res: Response): Promise<vo
     if (!receipt) {
       sendError(res, "Receipt not found", 404);
       return;
+    }
+    // Best-effort cleanup of the cached PDF; don't fail the delete on error.
+    if (receipt.filePath) {
+      deleteFromCloudinary(receipt.filePath).catch((e) =>
+        console.warn("[receipt.delete] Cloudinary cleanup failed:", e?.message),
+      );
     }
     sendSuccess(res, { _id: receipt._id }, "Receipt deleted");
   } catch (error: any) {

@@ -21,17 +21,42 @@
 import PDFDocument from "pdfkit";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { IReceipt } from "../models/Receipt";
+import { uploadToCloudinary } from "../lib/uploadToCloudinary";
 
 const execFileAsync = promisify(execFile);
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
-const RECEIPTS_DIR = path.join(__dirname, "../../receipts");
-if (!fs.existsSync(RECEIPTS_DIR)) {
-  fs.mkdirSync(RECEIPTS_DIR, { recursive: true });
+/**
+ * Receipt PDFs are rendered into the OS temp dir (writable on Vercel), uploaded
+ * to Cloudinary, then deleted locally. The receipt controller caches the
+ * returned URL on the Receipt document so subsequent requests skip re-render.
+ */
+const RECEIPTS_DIR = os.tmpdir();
+
+/** Cloudinary key for a receipt PDF, e.g. receipts/2026/receipt_KKB-2026-0001_en.pdf */
+function receiptKey(fileName: string, year: number): string {
+  return `receipts/${year || "unknown"}/${fileName}`;
+}
+
+/**
+ * Upload a temp-dir receipt PDF to Cloudinary, delete the local temp copy, and
+ * return the public URL. The temp file is removed even if the upload fails.
+ */
+async function uploadReceiptAndCleanup(
+  tmpPath: string,
+  fileName: string,
+  year: number,
+): Promise<string> {
+  try {
+    return await uploadToCloudinary(tmpPath, receiptKey(fileName, year));
+  } finally {
+    fs.unlink(tmpPath, () => {});
+  }
 }
 
 const PYTHON_SCRIPT = path.join(__dirname, "../../scripts/generate_urdu_receipt.py");
@@ -60,7 +85,8 @@ const EN_TO_UR_MONTH: Record<string, string> = {
 // ─── Public types ──────────────────────────────────────────────────────────
 
 export interface ReceiptResult {
-  pdfPath: string;
+  /** Public Cloudinary URL of the uploaded PDF. */
+  url: string;
   fileName: string;
 }
 
@@ -185,12 +211,12 @@ function renderEnglishSlip(
 }
 
 function generateEnglishPDF(receipt: IReceipt): Promise<ReceiptResult> {
-  return new Promise((resolve, reject) => {
-    const fileName = safeFileName(receipt.receiptNumber, "en");
-    const filePath = path.join(RECEIPTS_DIR, fileName);
+  const fileName = safeFileName(receipt.receiptNumber, "en");
+  const tmpPath = path.join(RECEIPTS_DIR, fileName);
 
+  const renderToTmp = new Promise<void>((resolve, reject) => {
     const doc = new PDFDocument({ size: "A5", margin: 0 });
-    const stream = fs.createWriteStream(filePath);
+    const stream = fs.createWriteStream(tmpPath);
     doc.pipe(stream);
 
     const pageW = doc.page.width;
@@ -200,8 +226,13 @@ function generateEnglishPDF(receipt: IReceipt): Promise<ReceiptResult> {
     renderEnglishSlip(doc, receipt, margin, margin, slipW);
 
     doc.end();
-    stream.on("finish", () => resolve({ pdfPath: filePath, fileName }));
+    stream.on("finish", () => resolve());
     stream.on("error", reject);
+  });
+
+  return renderToTmp.then(async () => {
+    const url = await uploadReceiptAndCleanup(tmpPath, fileName, receipt.year);
+    return { url, fileName };
   });
 }
 
@@ -264,7 +295,8 @@ async function generateUrduPDF(receipt: IReceipt): Promise<ReceiptResult> {
           `stderr: ${stderr?.trim() || "(none)"}`,
       );
     }
-    return { pdfPath: outPath, fileName: path.basename(outPath) };
+    const url = await uploadReceiptAndCleanup(outPath, path.basename(outPath), receipt.year);
+    return { url, fileName: path.basename(outPath) };
   } catch (err: any) {
     if (err && (err.stderr || err.stdout)) {
       const detail = [err.stderr, err.stdout].filter(Boolean).join("\n").trim();
