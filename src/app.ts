@@ -12,6 +12,9 @@ import { urduPipelineHealth } from "./utils/pdfGenerator";
 
 const app = express();
 
+// Required for Vercel/proxied environments — rate limiter reads X-Forwarded-For
+app.set("trust proxy", 1);
+
 // Ensure local scratch directories exist. Notices/receipts now stream to
 // Cloudinary (generated via os.tmpdir()), so only `uploads` is needed for
 // local dev. Wrapped in try/catch because the deployment FS is read-only on
