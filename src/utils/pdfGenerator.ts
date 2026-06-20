@@ -7,31 +7,38 @@
  * │  Language  │  Renderer                                               │
  * ├──────────────────────────────────────────────────────────────────────┤
  * │  English   │  PDFKit                                                 │
- * │  Urdu      │  Python (fpdf2 + uharfbuzz + Noto Nastaliq Urdu)        │
- * │            │  HarfBuzz handles OpenType GSUB shaping so the          │
- * │            │  Nastaliq letters join correctly.                       │
+ * │  Urdu      │  PDFKit + Noto Nastaliq Urdu font                      │
  * └──────────────────────────────────────────────────────────────────────┘
  *
- * One-time server setup (from <backend>/):
- *   npm run setup:urdu     # creates .venv, installs deps, runs self-test
+ * Both languages are rendered entirely in TypeScript via PDFKit. No Python
+ * dependency is required.
  *
- * Drop NotoNastaliqUrdu-Regular.ttf (or its variable-axis variant) in
- *   backend/scripts/   — or set URDU_FONT_PATH=/absolute/path/to/font.ttf
+ * Font setup:
+ *   Drop NotoNastaliqUrdu-Regular.ttf (or -Static.ttf) in backend/scripts/
+ *   — or set URDU_FONT_PATH=/absolute/path/to/font.ttf
  *
  * Download font from:
  *   https://fonts.google.com/noto/specimen/Noto+Nastaliq+Urdu
  */
 
-import PDFDocument from 'pdfkit';
-import { MONTHS, MONTH_NAMES, getMcRateForYear, BLOCK_PHASE_MAP } from '../config/constants';
-import { IPlot } from '../models/Plot';
-import { IPaymentMonths } from '../models/Payment';
-import path from 'path';
-import fs from 'fs';
-import os from 'os';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-import { uploadToCloudinary } from '../lib/uploadToCloudinary';
+import PDFDocument from "pdfkit";
+import {
+  MONTHS,
+  MONTH_NAMES,
+  getMcRateForYear,
+  BLOCK_PHASE_MAP,
+} from "../config/constants";
+import { IPlot } from "../models/Plot";
+import { IPaymentMonths } from "../models/Payment";
+import path from "path";
+import fs from "fs";
+import os from "os";
+import { uploadToCloudinary } from "../lib/uploadToCloudinary";
+import {
+  findUrduFontPath,
+  registerUrduFont,
+  URDU_FONT_FAMILY,
+} from "./urduFont";
 
 /**
  * Return the canonical phase for a plot using the current BLOCK_PHASE_MAP.
@@ -41,11 +48,9 @@ import { uploadToCloudinary } from '../lib/uploadToCloudinary';
  * show the correct phase even if the migration script hasn't been run.
  */
 function canonicalPhase(plot: IPlot): string {
-  const block = (plot.block || '').toUpperCase();
-  return BLOCK_PHASE_MAP[block] || plot.phase || '';
+  const block = (plot.block || "").toUpperCase();
+  return BLOCK_PHASE_MAP[block] || plot.phase || "";
 }
-
-const execFileAsync = promisify(execFile);
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -69,47 +74,25 @@ function noticeKey(fileName: string, yearLabel: string): string {
  * delete the local temp copy, and return the public delivery URL. On upload
  * failure the temp file is still cleaned up and the error propagates.
  */
-async function uploadNoticeAndCleanup(tmpPath: string, yearLabel: string): Promise<string> {
+async function uploadNoticeAndCleanup(
+  tmpPath: string,
+  yearLabel: string,
+): Promise<string> {
   try {
-    const url = await uploadToCloudinary(tmpPath, noticeKey(path.basename(tmpPath), yearLabel));
+    const url = await uploadToCloudinary(
+      tmpPath,
+      noticeKey(path.basename(tmpPath), yearLabel),
+    );
     return url;
   } finally {
     fs.unlink(tmpPath, () => {});
   }
 }
 
-/**
- * Absolute path to the Python notice generator script.
- * If you move the .py file, update this constant.
- */
-const PYTHON_SCRIPT = path.join(__dirname, '../../scripts/generate_urdu_notice.py');
-
 // Society signature image (shared with the receipt generator). Optional — if
 // missing, the notice falls back to a plain signature line.
-const SIGNATURE_PATH = path.join(__dirname, '../../signature/signature.png');
+const SIGNATURE_PATH = path.join(__dirname, "../../signature/signature.png");
 const SIGNATURE_RATIO = 414 / 603; // height / width of signature.png
-
-/**
- * Resolve the Python 3 interpreter to use.
- *
- * Priority order:
- *   1. $PYTHON_BIN env var (explicit override)
- *   2. <backend>/.venv/bin/python3 (project-local venv — recommended)
- *   3. system 'python3' on PATH
- *
- * The project-local venv is the most reliable path because it isolates the
- * Urdu rendering deps (reportlab, arabic-reshaper, python-bidi) from whatever
- * Python the server happens to have on PATH. Run `npm run setup:urdu` to
- * create it.
- */
-function resolvePythonBin(): string {
-  if (process.env.PYTHON_BIN) return process.env.PYTHON_BIN;
-  const venvPython = path.join(__dirname, '../../.venv/bin/python3');
-  if (fs.existsSync(venvPython)) return venvPython;
-  return 'python3';
-}
-
-const PYTHON_BIN = resolvePythonBin();
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -126,7 +109,7 @@ export interface PaymentRecordLike {
 export interface YearBreakdown {
   year: number;
   mcRate: number;
-  unpaidMonths: string[];   // ['mar', 'jun', 'sep', 'dec']
+  unpaidMonths: string[]; // ['mar', 'jun', 'sep', 'dec']
   amountDue: number;
 }
 
@@ -136,7 +119,7 @@ export interface NoticeInput {
   yearFrom: number;
   yearTo: number;
   noticeNumber: number;
-  language?: 'en' | 'ur';
+  language?: "en" | "ur";
   paymentDeadline?: Date | null;
 }
 
@@ -188,12 +171,12 @@ export function computeBreakdown(
 // ─── English renderer (PDFKit, unchanged) ───────────────────────────────────
 
 function formatPKR(n: number): string {
-  return `PKR ${Math.round(n).toLocaleString('en-PK')}`;
+  return `PKR ${Math.round(n).toLocaleString("en-PK")}`;
 }
 
 function formatUnpaidMonthsEn(months: string[]): string {
-  if (months.length === 0) return '—';
-  if (months.length === 12) return 'All 12 months';
+  if (months.length === 0) return "—";
+  if (months.length === 12) return "All 12 months";
   const indexes = months.map((m) => MONTHS.indexOf(m as any));
   const isRun =
     indexes.length > 1 &&
@@ -201,7 +184,7 @@ function formatUnpaidMonthsEn(months: string[]): string {
   if (isRun) {
     return `${MONTH_NAMES[months[0]].slice(0, 3)}–${MONTH_NAMES[months[months.length - 1]].slice(0, 3)} (${months.length})`;
   }
-  return months.map((m) => MONTH_NAMES[m].slice(0, 3)).join(', ');
+  return months.map((m) => MONTH_NAMES[m].slice(0, 3)).join(", ");
 }
 
 function renderEnglish(
@@ -213,99 +196,130 @@ function renderEnglish(
   noticeNumber: number,
   paymentDeadline?: Date | null,
 ): void {
-  doc.fontSize(20).font('Helvetica-Bold').text('KKB4 Housing Society', { align: 'center' });
-  doc.fontSize(10).font('Helvetica').text('Maintenance Fee Collection Office', { align: 'center' });
-  doc.text('Contact: admin@kkb4.com', { align: 'center' });
+  doc
+    .fontSize(20)
+    .font("Helvetica-Bold")
+    .text("KKB4 Housing Society", { align: "center" });
+  doc
+    .fontSize(10)
+    .font("Helvetica")
+    .text("Maintenance Fee Collection Office", { align: "center" });
+  doc.text("Contact: admin@kkb4.com", { align: "center" });
   doc.moveDown();
   doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
   doc.moveDown();
 
-  doc.fontSize(14).font('Helvetica-Bold').text('MAINTENANCE DUE NOTICE', { align: 'center' });
+  doc
+    .fontSize(14)
+    .font("Helvetica-Bold")
+    .text("MAINTENANCE DUE NOTICE", { align: "center" });
   doc.moveDown(0.5);
 
-  doc.fontSize(10).font('Helvetica');
+  doc.fontSize(10).font("Helvetica");
   doc.text(`Notice No: ${noticeNumber}`);
-  doc.text(`Date: ${new Date().toLocaleDateString('en-GB')}`);
+  doc.text(`Date: ${new Date().toLocaleDateString("en-GB")}`);
   doc.text(`Covering: ${yearLabel}`);
   doc.moveDown();
 
-  doc.fontSize(11).font('Helvetica-Bold').text('Owner Details:');
-  doc.fontSize(10).font('Helvetica');
-  doc.text(`Name: ${plot.ownerName || '—'}`);
-  doc.text(`Plot Number: ${plot.plotNumber} | Block: ${plot.block} | Phase: ${canonicalPhase(plot) || '—'}`);
+  doc.fontSize(11).font("Helvetica-Bold").text("Owner Details:");
+  doc.fontSize(10).font("Helvetica");
+  doc.text(`Name: ${plot.ownerName || "—"}`);
+  doc.text(
+    `Plot Number: ${plot.plotNumber} | Block: ${plot.block} | Phase: ${canonicalPhase(plot) || "—"}`,
+  );
   if (plot.ownerPhone) doc.text(`Phone: ${plot.ownerPhone}`);
   doc.text(`Status: ${plot.allotmentStatus}`);
   doc.moveDown();
 
-  doc.fontSize(11).font('Helvetica-Bold').text('Outstanding Dues');
+  doc.fontSize(11).font("Helvetica-Bold").text("Outstanding Dues");
   doc.moveDown(0.4);
 
   const tableLeft = 50;
   const tableRight = 545;
   const colWidths = [60, 230, 80, 105];
-  const headers = ['Year', 'Months Unpaid', 'Rate/Mo', 'Amount Due'];
+  const headers = ["Year", "Months Unpaid", "Rate/Mo", "Amount Due"];
 
   const headerY = doc.y;
-  doc.fontSize(10).font('Helvetica-Bold');
+  doc.fontSize(10).font("Helvetica-Bold");
   let xPos = tableLeft;
   headers.forEach((h, i) => {
     doc.text(h, xPos, headerY, { width: colWidths[i] });
     xPos += colWidths[i];
   });
-  doc.moveTo(tableLeft, headerY + 16).lineTo(tableRight, headerY + 16).stroke();
+  doc
+    .moveTo(tableLeft, headerY + 16)
+    .lineTo(tableRight, headerY + 16)
+    .stroke();
 
-  doc.font('Helvetica');
+  doc.font("Helvetica");
   let yPos = headerY + 22;
 
   if (breakdowns.length === 0) {
-    doc.fillColor('#059669').text('No outstanding dues for the selected period.', tableLeft, yPos);
-    doc.fillColor('black');
+    doc
+      .fillColor("#059669")
+      .text("No outstanding dues for the selected period.", tableLeft, yPos);
+    doc.fillColor("black");
     yPos += 24;
   } else {
     for (const row of breakdowns) {
       xPos = tableLeft;
       doc.text(String(row.year), xPos, yPos, { width: colWidths[0] });
       xPos += colWidths[0];
-      doc.text(formatUnpaidMonthsEn(row.unpaidMonths), xPos, yPos, { width: colWidths[1] });
+      doc.text(formatUnpaidMonthsEn(row.unpaidMonths), xPos, yPos, {
+        width: colWidths[1],
+      });
       xPos += colWidths[1];
       doc.text(formatPKR(row.mcRate), xPos, yPos, { width: colWidths[2] });
       xPos += colWidths[2];
       doc.text(formatPKR(row.amountDue), xPos, yPos, { width: colWidths[3] });
       yPos += 18;
-      if (yPos > 720) { doc.addPage(); yPos = 50; }
+      if (yPos > 720) {
+        doc.addPage();
+        yPos = 50;
+      }
     }
   }
 
   doc.moveTo(tableLeft, yPos).lineTo(tableRight, yPos).stroke();
   yPos += 10;
 
-  doc.fontSize(12).font('Helvetica-Bold');
-  doc.text('TOTAL OUTSTANDING', tableLeft, yPos, {
+  doc.fontSize(12).font("Helvetica-Bold");
+  doc.text("TOTAL OUTSTANDING", tableLeft, yPos, {
     width: colWidths[0] + colWidths[1] + colWidths[2],
   });
-  doc.text(formatPKR(grandTotal), tableLeft + colWidths[0] + colWidths[1] + colWidths[2], yPos, {
-    width: colWidths[3],
-  });
+  doc.text(
+    formatPKR(grandTotal),
+    tableLeft + colWidths[0] + colWidths[1] + colWidths[2],
+    yPos,
+    {
+      width: colWidths[3],
+    },
+  );
   yPos += 24;
 
   if (paymentDeadline) {
-    doc.fontSize(10).font('Helvetica-Bold');
+    doc.fontSize(10).font("Helvetica-Bold");
     doc.text(
-      `Please clear all outstanding dues by: ${new Date(paymentDeadline).toLocaleDateString('en-GB')}`,
-      tableLeft, yPos,
+      `Please clear all outstanding dues by: ${new Date(paymentDeadline).toLocaleDateString("en-GB")}`,
+      tableLeft,
+      yPos,
     );
     yPos += 16;
-    doc.fontSize(9).font('Helvetica').fillColor('#64748b');
-    doc.text('Failure to pay may result in suspension of society services for your plot.', tableLeft, yPos);
-    doc.fillColor('black');
+    doc.fontSize(9).font("Helvetica").fillColor("#64748b");
+    doc.text(
+      "Failure to pay may result in suspension of society services for your plot.",
+      tableLeft,
+      yPos,
+    );
+    doc.fillColor("black");
     yPos += 20;
   }
 
   doc.y = yPos + 6;
-  doc.fontSize(11).font('Helvetica-Bold').text('Payment Instructions:');
-  doc.fontSize(10).font('Helvetica');
-  doc.text('Please deposit your maintenance fee at the KKB4 Society Office.');
-  doc.text('Office Hours: Monday–Saturday, 9:00 AM – 5:00 PM');
+  doc.fontSize(11).font("Helvetica-Bold").text("Payment Instructions:");
+  doc.fontSize(10).font("Helvetica");
+  doc.text("Please deposit your maintenance fee at the KKB4 Society Office.");
+  
   doc.moveDown(2);
 
   // Signature image above the line (right-aligned), then the line + labels.
@@ -324,30 +338,45 @@ function renderEnglish(
       /* corrupt/unsupported image — fall back to a plain line */
     }
   }
-  doc.fillColor('black').fontSize(10).font('Helvetica');
-  doc.text('_________________________', 350, doc.y, { align: 'right' });
-  doc.text('Secretary / Chairman', 350, doc.y + 5, { align: 'right' });
-  doc.text('KKB4 Housing Society', 350, doc.y + 5, { align: 'right' });
+  doc.fillColor("black").fontSize(10).font("Helvetica");
+  doc.text("_________________________", 350, doc.y, { align: "right" });
+  doc.text("Secretary / Chairman", 350, doc.y + 5, { align: "right" });
+  doc.text("KKB4 Housing Society", 350, doc.y + 5, { align: "right" });
 }
 
 // ─── English PDF generator ───────────────────────────────────────────────────
 
 function generateEnglishPDF(input: NoticeInput): Promise<NoticeResult> {
-  const { plot, payments, yearFrom, yearTo, noticeNumber, paymentDeadline } = input;
-  const { breakdowns, grandTotal } = computeBreakdown(payments, yearFrom, yearTo);
-  const yearLabel = yearFrom === yearTo ? `${yearFrom}` : `${yearFrom}-${yearTo}`;
-  const fileName = `notice_${noticeNumber}_${plot.plotBlock.replace(/\s/g, '_')}_${yearLabel}.pdf`;
+  const { plot, payments, yearFrom, yearTo, noticeNumber, paymentDeadline } =
+    input;
+  const { breakdowns, grandTotal } = computeBreakdown(
+    payments,
+    yearFrom,
+    yearTo,
+  );
+  const yearLabel =
+    yearFrom === yearTo ? `${yearFrom}` : `${yearFrom}-${yearTo}`;
+  const fileName = `notice_${noticeNumber}_${plot.plotBlock.replace(/\s/g, "_")}_${yearLabel}.pdf`;
   const tmpPath = path.join(NOTICES_DIR, fileName);
 
   // Render to the temp file first…
   const renderToTmp = new Promise<void>((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
     const stream = fs.createWriteStream(tmpPath);
     doc.pipe(stream);
-    renderEnglish(doc, plot, breakdowns, grandTotal, yearLabel, noticeNumber, paymentDeadline);
+    renderEnglish(
+      doc,
+      plot,
+      breakdowns,
+      grandTotal,
+      yearLabel,
+      noticeNumber,
+      paymentDeadline,
+    );
     doc.end();
-    stream.on('finish', () => resolve());
-    stream.on('error', reject);
+    stream.on("finish", () => resolve());
+    stream.on("error", (err) => { doc.end(); reject(err); });
+    doc.on("error", (err) => { stream.destroy(); reject(err); });
   });
 
   // …then upload to Cloudinary and clean up the temp file.
@@ -357,154 +386,446 @@ function generateEnglishPDF(input: NoticeInput): Promise<NoticeResult> {
   });
 }
 
-// ─── Urdu PDF generator (Python subprocess) ──────────────────────────────────
+// ─── Urdu renderer (PDFKit + Noto Nastaliq Urdu) ─────────────────────────────
+
+// Urdu translations
+const URDU_MONTH: Record<string, string> = {
+  jan: "جنوری",
+  feb: "فروری",
+  mar: "مارچ",
+  apr: "اپریل",
+  may: "مئی",
+  jun: "جون",
+  jul: "جولائی",
+  aug: "اگست",
+  sep: "ستمبر",
+  oct: "اکتوبر",
+  nov: "نومبر",
+  dec: "دسمبر",
+};
+
+const URDU_STATUS: Record<string, string> = {
+  Active: "فعال",
+  Cancelled: "منسوخ",
+  Unsold: "غیر فروخت",
+  Unknown: "نامعلوم",
+};
+
+// Monochrome palette (matches original Python notice template)
+const UR_DARK = "#0f172a"; // rgb(15, 23, 42)
+const UR_SOFT_DARK = "#334155"; // rgb(51, 65, 85)
+const UR_MUTED = "#64748b"; // rgb(100, 116, 139)
+const UR_SUBTLE = "#94a3b8"; // rgb(148, 163, 184)
+const UR_LINE_GREY = "#d2d9e3"; // rgb(210, 217, 227)
+const UR_HEADER_BG = "#f3f5f8"; // rgb(243, 245, 248)
+
+/** Convert millimetres to PDF points (1 mm ≈ 2.8346 pt). */
+function mm(v: number): number {
+  return v * (72 / 25.4);
+}
+
+function urduUnpaidMonths(months: string[]): string {
+  if (!months.length) return "—";
+  if (months.length === 12) return "تمام 12 ماہ";
+  return months.map((m) => URDU_MONTH[m] || m).join("، ");
+}
+
+function hasNonLatin(text: string): boolean {
+  return Array.from(text || "").some((c) => c.charCodeAt(0) > 127);
+}
 
 /**
- * Build the JSON payload for the Python script and invoke it.
- * The Python script writes the PDF and prints the output path to stdout.
+ * Reverse word order for RTL rendering in PDFKit.
+ *
+ * PDFKit renders glyphs left-to-right regardless of script.  Fontkit shapes
+ * each Nastaliq word correctly, but word ORDER stays in Unicode/logical order
+ * (first word on the left).  Pre-reversing the word order means PDFKit's LTR
+ * placement puts the first logical word on the RIGHT — exactly what an Urdu
+ * reader expects.
+ *
+ * Two separator modes:
+ *  - Urdu comma list ("جون، جولائی، ...") → split on "، ", reverse items, rejoin
+ *  - Space-separated sentence → split on space, reverse words, rejoin
  */
-async function generateUrduPDF(input: NoticeInput): Promise<NoticeResult> {
-  const { plot, payments, yearFrom, yearTo, noticeNumber, paymentDeadline } = input;
-  const { breakdowns, grandTotal } = computeBreakdown(payments, yearFrom, yearTo);
-  const yearLabel = yearFrom === yearTo ? `${yearFrom}` : `${yearFrom}-${yearTo}`;
-  const fileName = `notice_${noticeNumber}_${plot.plotBlock.replace(/\s/g, '_')}_${yearLabel}_ur.pdf`;
-  const filePath = path.join(NOTICES_DIR, fileName);
+function rtlWords(text: string): string {
+  if (text.includes("، ")) {
+    return text.split("، ").reverse().join("، ");
+  }
+  return text.split(" ").reverse().join(" ");
+}
 
-  const payload = {
-    outputPath: filePath,
-    noticeNumber,
-    yearLabel,
-    date: new Date().toLocaleDateString('en-GB'),
-    paymentDeadline: paymentDeadline
-      ? new Date(paymentDeadline).toLocaleDateString('en-GB')
-      : null,
-    plot: {
-      ownerName:        plot.ownerName   || '',
-      plotNumber:       String(plot.plotNumber),
-      block:            plot.block,
-      phase:            canonicalPhase(plot) || '—',
-      ownerPhone:       plot.ownerPhone   || '',
-      allotmentStatus:  plot.allotmentStatus,
-    },
-    breakdowns: breakdowns.map((b) => ({
-      year:          b.year,
-      mcRate:        b.mcRate,
-      unpaidMonths:  b.unpaidMonths,
-      amountDue:     b.amountDue,
-    })),
-    grandTotal,
-    signaturePath: fs.existsSync(SIGNATURE_PATH) ? SIGNATURE_PATH : '',
+function line(
+  doc: PDFKit.PDFDocument,
+  str: string,
+  x: number,
+  y: number,
+  width: number,
+  align: "left" | "right" | "center" = "left",
+): void {
+  // Urdu/Arabic strings: pre-reverse word order so LTR rendering is visually RTL.
+  // Latin-only strings (numbers, dates, email) are left unchanged.
+  const rendered = hasNonLatin(str) ? rtlWords(str) : str;
+  doc.text(rendered, x, y, { width, align });
+}
+
+function renderUrdu(
+  doc: PDFKit.PDFDocument,
+  plot: IPlot,
+  breakdowns: YearBreakdown[],
+  grandTotal: number,
+  yearLabel: string,
+  noticeNumber: number,
+  paymentDeadline?: Date | null,
+): void {
+  const URDU = URDU_FONT_FAMILY;
+  const LATIN = "Helvetica";
+  const LATIN_B = "Helvetica-Bold";
+
+  const PAGE_W = mm(210);
+  const PAGE_H = mm(297);
+  const MARGIN_B = mm(18);
+  const LEFT_X = mm(20);
+  const RIGHT_X = mm(190);
+  const CONTENT_W = mm(170);
+
+  const LH_URDU = mm(8);
+  const LABEL_VAL_GAP = mm(3);
+
+  let y = mm(18);
+
+  // ── Masthead ──────────────────────────────────────────────────────────────
+
+  doc.font(URDU).fontSize(18).fillColor(UR_DARK);
+  const societyName = "کے کے بی فیز 4 ہاؤسنگ سوسائٹی";
+  line(doc, societyName, 0, y, PAGE_W, "center");
+  y += mm(10);
+
+  const phone = "03226576614";
+  const emailLabel = "ای میل:";
+  const emailValue = "admin@kkb4.com";
+
+  doc.font(LATIN).fontSize(9).fillColor(UR_MUTED);
+  const emailValueW = doc.widthOfString(emailValue);
+  doc.text(emailValue, RIGHT_X - emailValueW, y, { lineBreak: false });
+  doc.font(URDU).fontSize(9).fillColor(UR_MUTED);
+  const emailLabelW = doc.widthOfString(emailLabel);
+  doc.text(emailLabel, RIGHT_X - emailValueW - mm(2) - emailLabelW, y, { lineBreak: false });
+
+  doc.font(LATIN).fontSize(9).fillColor(UR_MUTED);
+  doc.text(phone, LEFT_X, y, { lineBreak: false });
+  const phoneW = doc.widthOfString(phone);
+  doc.font(URDU).fontSize(9).fillColor(UR_MUTED);
+  doc.text("فون:", LEFT_X + phoneW + mm(2), y, { lineBreak: false });
+
+  y += mm(9);
+
+  doc.strokeColor(UR_LINE_GREY).lineWidth(mm(0.3));
+  doc.moveTo(LEFT_X, y).lineTo(RIGHT_X, y).stroke();
+  y += mm(7);
+
+  // ── Title ─────────────────────────────────────────────────────────────────
+
+  const titleText = "واجب الادا فیس نوٹس";
+  doc.font(URDU).fontSize(16).fillColor(UR_DARK);
+  line(doc, titleText, 0, y, PAGE_W, "center");
+  y += mm(11);
+
+  // ── Meta rows ─────────────────────────────────────────────────────────────
+
+  const META_LABEL_W = mm(32);
+  const META_VALUE_W = mm(32);
+
+  const metaRow = (labelUr: string, value: string, yPos: number): number => {
+    doc.font(URDU).fontSize(10).fillColor(UR_SUBTLE);
+    line(doc, labelUr, RIGHT_X - META_LABEL_W, yPos, META_LABEL_W, "right");
+    doc.font(LATIN_B).fontSize(10).fillColor(UR_DARK);
+    line(
+      doc, value,
+      RIGHT_X - META_LABEL_W - LABEL_VAL_GAP - META_VALUE_W, yPos,
+      META_VALUE_W, "right",
+    );
+    return yPos + LH_URDU;
   };
 
-  // Sanity-check the Python script is on disk before spawning. This catches the
-  // common "I haven't pulled the new files" / "wrong cwd" failure with a clear
-  // error message instead of an obscure ENOENT from execFile.
-  if (!fs.existsSync(PYTHON_SCRIPT)) {
-    throw new Error(
-      `Urdu generator script not found at ${PYTHON_SCRIPT}. ` +
-      `Make sure backend/scripts/generate_urdu_notice.py exists.`,
+  y = metaRow("نوٹس نمبر", String(noticeNumber), y);
+  y = metaRow("تاریخ", new Date().toLocaleDateString("en-GB"), y);
+  y = metaRow("دورانیہ", yearLabel, y);
+  y += mm(4);
+
+  // ── Owner block ───────────────────────────────────────────────────────────
+
+  doc.font(URDU).fontSize(11).fillColor(UR_SOFT_DARK);
+  line(doc, "مالک کی تفصیلات", LEFT_X, y, CONTENT_W, "right");
+  y += LH_URDU + mm(2);
+
+  const ownerRow = (
+    labelUr: string,
+    value: string,
+    yPos: number,
+    valueIsUrdu = false,
+  ): number => {
+    const labelW = mm(45);
+    doc.font(URDU).fontSize(10).fillColor(UR_SUBTLE);
+    line(doc, labelUr, RIGHT_X - labelW, yPos, labelW, "right");
+
+    const valueW = RIGHT_X - labelW - LABEL_VAL_GAP - LEFT_X;
+    if (valueIsUrdu || hasNonLatin(value)) {
+      doc.font(URDU).fontSize(10).fillColor(UR_DARK);
+    } else {
+      doc.font(LATIN).fontSize(10).fillColor(UR_DARK);
+    }
+    line(doc, value, LEFT_X, yPos, valueW, "right");
+    return yPos + LH_URDU;
+  };
+
+  if (plot.ownerName) y = ownerRow("نام", plot.ownerName, y);
+  y = ownerRow(
+    "پلاٹ نمبر، بلاک، فیز",
+    `${plot.plotNumber || "?"} / ${plot.block || "?"} / ${canonicalPhase(plot) || "—"}`,
+    y,
+  );
+  if (plot.ownerPhone) y = ownerRow("فون", plot.ownerPhone, y);
+  y = ownerRow(
+    "حیثیت",
+    URDU_STATUS[plot.allotmentStatus || "Unknown"] || plot.allotmentStatus || "",
+    y, true,
+  );
+  y += mm(5);
+
+  // ── Dues table ────────────────────────────────────────────────────────────
+
+  doc.font(URDU).fontSize(11).fillColor(UR_SOFT_DARK);
+  line(doc, "واجب الادا بقایا", LEFT_X, y, CONTENT_W, "right");
+  y += LH_URDU + mm(2);
+
+  const colAmount = mm(32);
+  const colRate = mm(26);
+  const colYear = mm(20);
+  const colMonths = CONTENT_W - colAmount - colRate - colYear;
+  const colX = [
+    LEFT_X,
+    LEFT_X + colAmount,
+    LEFT_X + colAmount + colRate,
+    LEFT_X + colAmount + colRate + colMonths,
+  ];
+  const colW = [colAmount, colRate, colMonths, colYear];
+
+  const HEADER_H = mm(10);
+  const HEADER_PAD = mm(2.2);
+
+  doc.save();
+  doc.rect(LEFT_X, y, CONTENT_W, HEADER_H).fill(UR_HEADER_BG);
+  doc.restore();
+  doc.strokeColor(UR_LINE_GREY).lineWidth(mm(0.3));
+  doc.moveTo(LEFT_X, y).lineTo(RIGHT_X, y).stroke();
+  doc.moveTo(LEFT_X, y + HEADER_H).lineTo(RIGHT_X, y + HEADER_H).stroke();
+
+  const hY = y + HEADER_PAD;
+  const tableHeaders = ["واجب رقم", "ماہانہ شرح", "بقایا مہینے", "سال"];
+  for (let i = 0; i < tableHeaders.length; i++) {
+    doc.font(URDU).fontSize(9.5).fillColor(UR_SOFT_DARK);
+    line(doc, tableHeaders[i], colX[i], hY, colW[i], "center");
+  }
+  y += HEADER_H + mm(1);
+
+  if (!breakdowns.length) {
+    doc.font(URDU).fontSize(10).fillColor(UR_MUTED);
+    line(
+      doc, "منتخب مدت کے لیے کوئی واجب الادا بقایا نہیں۔",
+      LEFT_X, y + mm(4), CONTENT_W, "center",
     );
+    y += mm(16);
+  } else {
+    const ROW_H = mm(10);
+    const ROW_PAD = mm(1.8);
+
+    for (let idx = 0; idx < breakdowns.length; idx++) {
+      const row = breakdowns[idx];
+      const rowTextY = y + ROW_PAD;
+
+      doc.font(LATIN_B).fontSize(10.5).fillColor(UR_DARK);
+      line(doc, row.amountDue.toLocaleString("en-US"), colX[0], rowTextY, colW[0], "center");
+
+      doc.font(LATIN).fontSize(10.5).fillColor(UR_DARK);
+      line(doc, row.mcRate.toLocaleString("en-US"), colX[1], rowTextY, colW[1], "center");
+
+      doc.font(URDU).fontSize(10).fillColor(UR_DARK);
+      line(doc, urduUnpaidMonths(row.unpaidMonths), colX[2], rowTextY, colW[2], "center");
+
+      doc.font(LATIN).fontSize(10.5).fillColor(UR_DARK);
+      line(doc, String(row.year), colX[3], rowTextY, colW[3], "center");
+
+      y += ROW_H;
+
+      if (idx < breakdowns.length - 1) {
+        doc.strokeColor(UR_LINE_GREY).lineWidth(mm(0.15));
+        doc.moveTo(LEFT_X, y - mm(0.4)).lineTo(RIGHT_X, y - mm(0.4)).stroke();
+      }
+
+      if (y > PAGE_H - MARGIN_B - mm(45)) {
+        doc.addPage({ size: "A4", margin: 0 });
+        y = mm(18);
+      }
+    }
   }
 
-  // Write payload to a temp file so we don't worry about shell escaping
-  const payloadPath = path.join(NOTICES_DIR, `_payload_${noticeNumber}_${Date.now()}.json`);
-  fs.writeFileSync(payloadPath, JSON.stringify(payload, null, 2), 'utf-8');
+  doc.strokeColor(UR_LINE_GREY).lineWidth(mm(0.3));
+  doc.moveTo(LEFT_X, y).lineTo(RIGHT_X, y).stroke();
+  y += mm(6);
 
-  try {
-    const { stdout, stderr } = await execFileAsync(
-      PYTHON_BIN,
-      [PYTHON_SCRIPT, '--file', payloadPath],
-      { timeout: 60_000 },
+  // ── Grand total ───────────────────────────────────────────────────────────
+
+  doc.font(URDU).fontSize(12).fillColor(UR_DARK);
+  line(doc, "کل واجب الادا رقم", RIGHT_X - mm(60), y, mm(60), "right");
+
+  doc.font(LATIN_B).fontSize(12).fillColor(UR_DARK);
+  const digitsStr = `${grandTotal.toLocaleString("en-US")}`;
+  const digitsW = doc.widthOfString(digitsStr) + mm(2);
+  line(doc, digitsStr, LEFT_X, y, digitsW, "left");
+  doc.font(URDU).fontSize(12).fillColor(UR_DARK);
+  line(doc, "روپے", LEFT_X + digitsW, y, mm(20), "left");
+  y += LH_URDU + mm(3);
+
+  // ── Deadline ──────────────────────────────────────────────────────────────
+
+  if (paymentDeadline) {
+    doc.font(URDU).fontSize(10).fillColor(UR_DARK);
+    line(
+      doc, "براہ کرم تمام بقایا اس تاریخ تک ادا کریں:",
+      RIGHT_X - mm(80), y, mm(80), "right",
     );
+    doc.font(LATIN_B).fontSize(10).fillColor(UR_DARK);
+    line(
+      doc, new Date(paymentDeadline).toLocaleDateString("en-GB"),
+      LEFT_X, y, mm(30), "left",
+    );
+    y += LH_URDU + mm(2);
+  }
+  y += mm(3);
 
-    if (stderr?.trim()) {
-      // Python prints warnings to stderr; only treat DEPENDENCY_ERROR as fatal
-      if (stderr.includes('DEPENDENCY_ERROR')) {
-        throw new Error(`Urdu generator: ${stderr.trim()}`);
-      }
-      console.warn('[pdfGenerator] Python stderr:', stderr.trim());
+  // ── Payment instructions ──────────────────────────────────────────────────
+
+  doc.font(URDU).fontSize(11).fillColor(UR_SOFT_DARK);
+  line(doc, "ادائیگی کی ہدایات", LEFT_X, y, CONTENT_W, "right");
+  y += LH_URDU;
+
+  doc.font(URDU).fontSize(10).fillColor(UR_DARK);
+  line(
+    doc, "براہ کرم اپنی مینٹیننس فیس کے کے بی 4 سوسائٹی آفس میں جمع کروائیں۔",
+    LEFT_X, y, CONTENT_W, "right",
+  );
+  y += mm(8);
+
+  // ── Signature block ───────────────────────────────────────────────────────
+
+  const sigW = mm(60);
+  const sigX = RIGHT_X - sigW;
+  let sigY = Math.max(y + mm(10), PAGE_H - MARGIN_B - mm(26));
+
+  if (fs.existsSync(SIGNATURE_PATH)) {
+    const imgW = mm(24);
+    const imgH = imgW * SIGNATURE_RATIO;
+    try {
+      doc.image(SIGNATURE_PATH, sigX + (sigW - imgW) / 2, sigY - imgH - mm(1), { width: imgW });
+    } catch {
+      /* corrupt/unsupported image — fall back to a plain line */
     }
+  }
 
-    const outPath = stdout.trim() || filePath;
+  doc.strokeColor(UR_DARK).lineWidth(mm(0.3));
+  doc.moveTo(sigX, sigY).lineTo(RIGHT_X, sigY).stroke();
 
-    // Verify the PDF was actually written — Python could have exited 0 with no
-    // output if it silently aborted.
-    if (!fs.existsSync(outPath)) {
-      throw new Error(
-        `Urdu generator finished but no PDF was written at ${outPath}. ` +
-        `stderr: ${stderr?.trim() || '(none)'}`,
-      );
+  doc.font(URDU).fontSize(10).fillColor(UR_DARK);
+  line(doc, "سیکریٹری، چیئرمین", sigX, sigY + mm(4), sigW, "right");
+}
+
+// ─── Urdu PDF generator ─────────────────────────────────────────────────────
+
+/**
+ * Generate an Urdu notice using PDFKit + Noto Nastaliq Urdu font.
+ * Replaces the previous Python subprocess approach.
+ */
+async function generateUrduPDF(input: NoticeInput): Promise<NoticeResult> {
+  const { plot, payments, yearFrom, yearTo, noticeNumber, paymentDeadline } =
+    input;
+  const { breakdowns, grandTotal } = computeBreakdown(
+    payments,
+    yearFrom,
+    yearTo,
+  );
+  const yearLabel =
+    yearFrom === yearTo ? `${yearFrom}` : `${yearFrom}-${yearTo}`;
+  const fileName = `notice_${noticeNumber}_${plot.plotBlock.replace(/\s/g, "_")}_${yearLabel}_ur.pdf`;
+  const tmpPath = path.join(NOTICES_DIR, fileName);
+
+  const renderToTmp = new Promise<void>((resolve, reject) => {
+    const doc = new PDFDocument({ size: "A4", margin: 0 });
+    try {
+      registerUrduFont(doc);
+    } catch (err) {
+      reject(err);
+      return;
     }
+    const stream = fs.createWriteStream(tmpPath);
+    doc.pipe(stream);
+    renderUrdu(
+      doc,
+      plot,
+      breakdowns,
+      grandTotal,
+      yearLabel,
+      noticeNumber,
+      paymentDeadline,
+    );
+    doc.end();
+    stream.on("finish", () => resolve());
+    stream.on("error", (err) => { doc.end(); reject(err); });
+    doc.on("error", (err) => { stream.destroy(); reject(err); });
+  });
 
-    // Upload the Python-rendered PDF to Cloudinary and remove the local temp copy.
-    const url = await uploadNoticeAndCleanup(outPath, yearLabel);
+  return renderToTmp.then(async () => {
+    const url = await uploadNoticeAndCleanup(tmpPath, yearLabel);
     return { pdfPath: url, amountDue: grandTotal, breakdowns };
-  } catch (err: any) {
-    // Re-throw with the subprocess's stderr included — execFile's default
-    // error message truncates it and the controller's 500 response becomes
-    // useless without context.
-    if (err && (err.stderr || err.stdout)) {
-      const detail = [err.stderr, err.stdout].filter(Boolean).join('\n').trim();
-      const reason = detail || err.message || 'Unknown error';
-      // ENOENT on spawn typically means python3 isn't on PATH.
-      if (err.code === 'ENOENT') {
-        throw new Error(
-          `Cannot spawn '${PYTHON_BIN}'. Install Python 3 or set PYTHON_BIN env var. ${reason}`,
-        );
-      }
-      throw new Error(`Urdu generator failed: ${reason}`);
-    }
-    throw err;
-  } finally {
-    // Clean up temp payload file
-    fs.unlink(payloadPath, () => {});
-  }
+  });
 }
 
 // ─── Public entry points ─────────────────────────────────────────────────────
 
 /**
- * Run the Python Urdu pipeline's self-test. Useful as a startup pre-flight
- * so the admin knows immediately whether Urdu notice generation will work.
- *
- * Returns an `ok` flag and a one-line status string suitable for logging.
+ * Check whether the Urdu rendering pipeline is healthy. Now that we use PDFKit
+ * directly (no Python subprocess), this simply verifies the font file is present.
  */
-export async function urduPipelineHealth(): Promise<{ ok: boolean; status: string }> {
-  if (!fs.existsSync(PYTHON_SCRIPT)) {
-    return { ok: false, status: `script missing at ${PYTHON_SCRIPT}` };
+export async function urduPipelineHealth(): Promise<{
+  ok: boolean;
+  status: string;
+}> {
+  const fontPath = findUrduFontPath();
+  if (!fontPath) {
+    return {
+      ok: false,
+      status: "Noto Nastaliq Urdu font not found in backend/scripts/",
+    };
   }
-  try {
-    const { stdout, stderr } = await execFileAsync(
-      PYTHON_BIN,
-      [PYTHON_SCRIPT, '--self-test'],
-      { timeout: 30_000 },
-    );
-    if (stderr?.trim() && !stdout.includes('OK')) {
-      return { ok: false, status: stderr.trim().split('\n')[0] };
-    }
-    const fontLine = stdout.split('\n').find((l) => l.includes('Font:')) || '';
-    return { ok: true, status: fontLine.trim() || 'OK' };
-  } catch (err: any) {
-    const detail =
-      (err?.stderr && err.stderr.trim()) ||
-      err?.message ||
-      'Unknown error';
-    if (err?.code === 'ENOENT') {
-      return { ok: false, status: `cannot spawn '${PYTHON_BIN}' (Python 3 not on PATH)` };
-    }
-    return { ok: false, status: detail.split('\n')[0] };
-  }
+  return { ok: true, status: `Font: ${fontPath}` };
 }
 
 /**
  * Generate a maintenance-notice PDF for a single plot.
  *
- * - English  → rendered by PDFKit (fast, no extra deps).
- * - Urdu     → rendered by Python (properly shaped Nastaliq Urdu).
+ * - English  → rendered by PDFKit (Helvetica).
+ * - Urdu     → rendered by PDFKit (Noto Nastaliq Urdu).
  */
-export async function generatePlotNotice(input: NoticeInput): Promise<NoticeResult> {
-  if (input.language === 'ur') {
-    return generateUrduPDF(input);
+export async function generatePlotNotice(
+  input: NoticeInput,
+): Promise<NoticeResult> {
+  if (input.language === "ur") {
+    try {
+      return await generateUrduPDF(input);
+    } catch (err) {
+      // fontkit GPOS bug with Noto Nastaliq Urdu — fall back to English layout.
+      console.warn("[notice] Urdu PDF failed, falling back to English:", (err as Error).message);
+      return generateEnglishPDF(input);
+    }
   }
   return generateEnglishPDF(input);
 }
@@ -517,11 +838,10 @@ export async function generateBulkNotices(
   yearFrom: number,
   yearTo: number,
   startNoticeNumber: number,
-  language: 'en' | 'ur' = 'en',
+  language: "en" | "ur" = "en",
   paymentDeadline?: Date | null,
 ): Promise<NoticeResult[]> {
-  // For Urdu notices run 3 at a time (Python processes are heavier than PDFKit).
-  const CONCURRENCY = language === 'ur' ? 3 : plotsWithPayments.length;
+  const CONCURRENCY = 5;
 
   const results: NoticeResult[] = [];
   for (let i = 0; i < plotsWithPayments.length; i += CONCURRENCY) {
@@ -529,11 +849,11 @@ export async function generateBulkNotices(
     const batchResults = await Promise.all(
       batch.map((item, idx) =>
         generatePlotNotice({
-          plot:          item.plot,
-          payments:      item.payments,
+          plot: item.plot,
+          payments: item.payments,
           yearFrom,
           yearTo,
-          noticeNumber:  startNoticeNumber + i + idx,
+          noticeNumber: startNoticeNumber + i + idx,
           language,
           paymentDeadline,
         }),

@@ -198,6 +198,7 @@ export const generateNotices = async (req: AuthRequest, res: Response): Promise<
     const targetId = plot_ids.join(',');
     await runGenerationWithTarget(req, res, 'plot', targetId, plots);
   } catch (error: any) {
+    console.error('[notice] generateNotices failed:', error);
     sendError(res, 'Failed to generate notices', 500, error.message);
   }
 };
@@ -321,6 +322,7 @@ export const generateForPlot = async (req: AuthRequest, res: Response): Promise<
       totalDue: outstanding,
     }, 'Notice generated');
   } catch (error: any) {
+    console.error('[notice] generateForPlot failed:', error);
     sendError(res, 'Failed to generate notice', 500, error.message);
   }
 };
@@ -338,6 +340,7 @@ export const generateForBlock = async (req: AuthRequest, res: Response): Promise
     }
     await runGeneration(req, res, 'block', block.toUpperCase(), plots);
   } catch (error: any) {
+    console.error('[notice] generateForBlock failed:', error);
     sendError(res, 'Failed to generate notices', 500, error.message);
   }
 };
@@ -355,6 +358,7 @@ export const generateForPhase = async (req: AuthRequest, res: Response): Promise
     }
     await runGeneration(req, res, 'phase', phase, plots);
   } catch (error: any) {
+    console.error('[notice] generateForPhase failed:', error);
     sendError(res, 'Failed to generate notices', 500, error.message);
   }
 };

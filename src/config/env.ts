@@ -1,10 +1,14 @@
 import dotenv from "dotenv";
 import path from "path";
 
-const nodeEnv = process.env.NODE_ENV || "development";
-dotenv.config({
-  path: path.resolve(process.cwd(), `.env.${nodeEnv}`),
-});
+// On Vercel, env vars are injected directly — no .env files exist on the
+// filesystem. Only load from .env files when running locally.
+if (!process.env.VERCEL) {
+  const nodeEnv = process.env.NODE_ENV || "development";
+  dotenv.config({
+    path: path.resolve(process.cwd(), `.env.${nodeEnv}`),
+  });
+}
 
 export const env = {
   PORT: parseInt(process.env.PORT || "5000", 10),

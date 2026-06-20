@@ -102,6 +102,15 @@ export const createReceipt = async (req: AuthRequest, res: Response): Promise<vo
       generatedBy: req.admin?.id,
     });
 
+    // Generate PDF immediately so filePath (Cloudinary URL) is available right away.
+    try {
+      const { url } = await generateReceiptPDF(receipt);
+      receipt.filePath = url;
+      await receipt.save();
+    } catch (err) {
+      console.warn("[receipt] Eager PDF generation failed:", (err as Error).message);
+    }
+
     sendSuccess(res, receipt, "Receipt created", 201);
   } catch (error: any) {
     if (error?.code === 11000) {
@@ -168,6 +177,7 @@ export const generatePDF = async (req: Request, res: Response): Promise<void> =>
       else res.end();
     });
   } catch (error: any) {
+    console.error('[receipt] generatePDF failed:', error);
     sendError(res, "Failed to generate receipt PDF", 500, error.message);
   }
 };

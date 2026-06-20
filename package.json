@@ -4,15 +4,14 @@
   "description": "KKB4 Housing Society Maintenance Management System - Backend API",
   "main": "dist/app.js",
   "scripts": {
+    "postinstall": "node scripts/patch-fontkit.js",
     "dev": "NODE_ENV=development ts-node-dev --respawn --transpile-only src/app.ts",
     "build:dev": "tsc",
     "build:prod": "tsc",
     "start": "NODE_ENV=production node dist/app.js",
     "seed": "NODE_ENV=development ts-node src/scripts/seedFromExcel.ts",
     "migrate:phases": "NODE_ENV=development ts-node src/scripts/migratePhases.ts",
-    "migrate:phases:dry": "NODE_ENV=development ts-node src/scripts/migratePhases.ts --dry",
-    "setup:urdu": "python3 -m venv .venv && .venv/bin/pip install --upgrade pip fpdf2 uharfbuzz fonttools && .venv/bin/python scripts/generate_urdu_notice.py --self-test",
-    "test:urdu": ".venv/bin/python scripts/generate_urdu_notice.py --self-test"
+    "migrate:phases:dry": "NODE_ENV=development ts-node src/scripts/migratePhases.ts --dry"
   },
   "dependencies": {
     "@fontsource/noto-naskh-arabic": "^5.2.11",

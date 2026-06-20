@@ -38,29 +38,40 @@ app.use("/api", routes);
 // Error handler
 app.use(errorHandler);
 
-// Start server
-const startServer = async () => {
+// ── Bootstrap (connect DB + seed admin) ────────────────────────────────────
+let bootstrapped = false;
+const bootstrap = async () => {
+  if (bootstrapped) return;
   await connectDB();
   await ensureDefaultAdmin();
-  app.listen(env.PORT, () => {
-    console.log(`🚀 KKB4 API running on http://localhost:${env.PORT}`);
-    console.log(`📋 Environment: ${env.NODE_ENV}`);
-  });
-  // Fire-and-log Urdu pipeline check (non-blocking). The admin sees the result
-  // in the server log so a misconfigured Urdu setup is obvious on boot rather
-  // than only at the moment they try to generate a notice.
-  urduPipelineHealth()
-    .then(({ ok, status }) => {
-      const tag = ok ? "✅" : "⚠️";
-      console.log(`${tag} Urdu PDF pipeline: ${ok ? "ready" : "NOT READY"} — ${status}`);
-      if (!ok) {
-        console.log("   Run: pip install reportlab arabic-reshaper python-bidi");
-        console.log("   And place NotoNastaliqUrdu-Regular.ttf in backend/scripts/");
-      }
-    })
-    .catch((err) => console.warn("⚠️  Urdu pipeline check failed:", err));
+  bootstrapped = true;
 };
 
-startServer().catch(console.error);
+// When running locally (`npm run dev`), start the HTTP server.
+// On Vercel, the serverless adapter in api/index.ts handles requests.
+if (!process.env.VERCEL) {
+  const startServer = async () => {
+    await bootstrap();
+    app.listen(env.PORT, () => {
+      console.log(`🚀 KKB4 API running on http://localhost:${env.PORT}`);
+      console.log(`📋 Environment: ${env.NODE_ENV}`);
+    });
+    // Fire-and-log Urdu pipeline check (non-blocking)
+    urduPipelineHealth()
+      .then(({ ok, status }) => {
+        const tag = ok ? "✅" : "⚠️";
+        console.log(`${tag} Urdu PDF pipeline: ${ok ? "ready" : "NOT READY"} — ${status}`);
+        if (!ok) {
+          console.log("   Place NotoNastaliqUrdu-Regular.ttf in backend/scripts/");
+        }
+      })
+      .catch((err) => console.warn("⚠️  Urdu pipeline check failed:", err));
+  };
+  startServer().catch(console.error);
+} else {
+  // Serverless: just bootstrap (connect + seed) on cold start
+  bootstrap().catch(console.error);
+}
 
 export default app;
+
