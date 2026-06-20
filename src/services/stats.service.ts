@@ -12,25 +12,32 @@ export class StatsService {
     const payments = await Payment.find(paymentFilter).populate('plot').lean();
     const totalPlots = await Plot.countDocuments({ isActive: true });
 
+    const now = new Date();
+    const currentYear = now.getFullYear();
     const startIdx = monthFrom ? MONTHS.indexOf(monthFrom as any) : 0;
-    const endIdx = monthTo ? MONTHS.indexOf(monthTo as any) : 11;
-    const monthsInRange = MONTHS.slice(
-      startIdx === -1 ? 0 : startIdx,
-      (endIdx === -1 ? 11 : endIdx) + 1
-    );
+    let endIdx: number;
+    if (monthTo) {
+      endIdx = MONTHS.indexOf(monthTo as any);
+      if (endIdx === -1) endIdx = 11;
+    } else if (!isOverall && year === currentYear) {
+      endIdx = now.getMonth(); // cap at current month for current year
+    } else {
+      endIdx = 11;
+    }
+    const monthsInRange = MONTHS.slice(startIdx === -1 ? 0 : startIdx, endIdx + 1);
+
+    // totalDue = ALL active plots × rate × months elapsed (not just plots with records)
+    const mcRate = getMcRateForYear(isOverall ? currentYear : year);
+    const totalDue = isOverall ? 0 : totalPlots * mcRate * monthsInRange.length;
 
     let totalCollected = 0;
-    let totalDue = 0;
     let paidPlots = 0;
     let defaulterPlots = 0;
 
     for (const p of payments) {
       if (isOverall) {
-        // For overall, use full year data
         totalCollected += p.totalReceived || 0;
-        totalDue += p.totalDue || 0;
       } else {
-        // For specific year with month range
         let received = 0;
         for (const m of monthsInRange) {
           const val = (p.payments as any)[m];
@@ -39,13 +46,12 @@ export class StatsService {
           }
         }
         totalCollected += received;
-        totalDue += p.mcRate * monthsInRange.length;
       }
       if (p.totalReceived > 0) paidPlots++;
       if (p.totalReceived === 0) defaulterPlots++;
     }
 
-    const totalRemaining = totalDue - totalCollected;
+    const totalRemaining = Math.max(0, totalDue - totalCollected);
     const collectionRate = totalDue > 0 ? Math.round((totalCollected / totalDue) * 100) : 0;
 
     return {
@@ -70,22 +76,35 @@ export class StatsService {
     if (!isOverall) paymentFilter.year = year;
     const payments = await Payment.find(paymentFilter).lean();
 
+    // For current year with no explicit range, cap at current month (not Dec)
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonthIdx = now.getMonth(); // 0-based: June = 5
+
     const startIdx = monthFrom ? MONTHS.indexOf(monthFrom as any) : 0;
-    const endIdx = monthTo ? MONTHS.indexOf(monthTo as any) : 11;
-    const monthsInRange = MONTHS.slice(
-      startIdx === -1 ? 0 : startIdx,
-      (endIdx === -1 ? 11 : endIdx) + 1
-    );
+    let endIdx: number;
+    if (monthTo) {
+      endIdx = MONTHS.indexOf(monthTo as any);
+      if (endIdx === -1) endIdx = 11;
+    } else if (!isOverall && year === currentYear) {
+      endIdx = currentMonthIdx; // only months elapsed this year
+    } else {
+      endIdx = 11;
+    }
+    const monthsInRange = MONTHS.slice(startIdx === -1 ? 0 : startIdx, endIdx + 1);
+
+    const mcRate = getMcRateForYear(isOverall ? currentYear : year);
+
+    // totalDue = ALL active plots × rate × months elapsed (not just plots with records)
+    const totalDue = isOverall ? 0 : plots.length * mcRate * monthsInRange.length;
 
     let totalCollected = 0;
-    let totalDue = 0;
     let paidCount = 0;
     let defaulterCount = 0;
 
     for (const p of payments) {
       if (isOverall) {
         totalCollected += p.totalReceived || 0;
-        totalDue += p.totalDue || 0;
       } else {
         let received = 0;
         for (const m of monthsInRange) {
@@ -95,7 +114,6 @@ export class StatsService {
           }
         }
         totalCollected += received;
-        totalDue += p.mcRate * monthsInRange.length;
       }
       if (p.totalReceived > 0) paidCount++;
       else defaulterCount++;
@@ -108,7 +126,7 @@ export class StatsService {
       totalPlots: plots.length,
       totalCollected,
       totalDue,
-      remaining: totalDue - totalCollected,
+      remaining: Math.max(0, totalDue - totalCollected),
       collectionRate: totalDue > 0 ? Math.round((totalCollected / totalDue) * 100) : 0,
       paidCount,
       defaulterCount,

@@ -36,15 +36,29 @@ export const getBlockDetail = async (req: Request, res: Response): Promise<void>
     const paymentsMap = new Map(payments.map(p => [p.plot.toString(), p]));
 
     const mcRate = getMcRateForYear(year);
+    const now = new Date();
+    // For the current year, only count months that have elapsed (Jan → current month).
+    // For past years, the full 12 months are due.
+    const monthsElapsed = year === now.getFullYear() ? now.getMonth() + 1 : 12;
+    const MONTH_KEYS = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
 
     const plotsWithPayments = plots.map(p => {
       const pay = paymentsMap.get(p._id.toString());
+      // Sum only months up to monthsElapsed so "paid" matches the dues window
+      let paidInWindow = 0;
+      if (pay) {
+        for (let i = 0; i < monthsElapsed; i++) {
+          const val = (pay.payments as any)[MONTH_KEYS[i]];
+          if (val !== null && val !== undefined && !isNaN(val)) paidInWindow += val;
+        }
+      }
+      const due = mcRate * monthsElapsed;
       return {
         ...p,
         plotCode: `${p.plotNumber}-${p.block}`,
-        paid: pay ? pay.totalReceived : 0,
-        due: pay ? pay.totalDue : mcRate * 12,
-        remaining: pay ? pay.remaining : mcRate * 12,
+        paid: paidInWindow,
+        due,
+        remaining: Math.max(0, due - paidInWindow),
         paymentId: pay ? pay._id.toString() : null,
         payments: pay ? pay.payments : {
           jan: null, feb: null, mar: null, apr: null, may: null, jun: null,
