@@ -30,7 +30,15 @@ for (const dir of dirs) {
 }
 
 // Middleware
-app.use(cors({ origin: env.CORS_ORIGINS, credentials: true }));
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (origin.endsWith(".vercel.app")) return callback(null, true);
+    if (env.CORS_ORIGINS.includes(origin)) return callback(null, true);
+    callback(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+}));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(generalLimiter);
