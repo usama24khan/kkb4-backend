@@ -8,6 +8,7 @@ import routes from "./routes";
 import { errorHandler } from "./middleware/errorHandler";
 import { generalLimiter } from "./middleware/rateLimiter";
 import { ensureDefaultAdmin } from "./controllers/auth.controller";
+import { ensureDefaultRates, ensureTestData } from "./controllers/seed.controller";
 import { urduPipelineHealth } from "./utils/pdfGenerator";
 
 const app = express();
@@ -55,6 +56,8 @@ const bootstrap = async () => {
   if (bootstrapped) return;
   await connectDB();
   await ensureDefaultAdmin();
+  await ensureDefaultRates();
+  await ensureTestData();
   bootstrapped = true;
 };
 
