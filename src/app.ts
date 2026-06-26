@@ -44,6 +44,19 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(generalLimiter);
 
+// Ensure DB is connected before processing any API request.
+// connectDB() is idempotent — warm invocations return immediately.
+// This eliminates the race condition on Vercel cold starts where bootstrap()
+// fires async but the first request arrives before the connection is ready.
+app.use("/api", async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
+
 // API Routes
 app.use("/api", routes);
 
