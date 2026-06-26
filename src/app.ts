@@ -83,8 +83,13 @@ if (!process.env.VERCEL) {
   };
   startServer().catch(console.error);
 } else {
-  // Serverless: just bootstrap (connect + seed) on cold start
-  bootstrap().catch(console.error);
+  // Serverless cold-start: connect + seed.
+  // Log failures but DO NOT crash the process — a transient Atlas blip
+  // should not take down the entire Vercel function; individual request
+  // handlers will surface DB errors if the connection is unavailable.
+  bootstrap().catch((err: Error) => {
+    console.error("⚠️  Bootstrap failed (non-fatal):", err.message);
+  });
 }
 
 export default app;
