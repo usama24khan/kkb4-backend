@@ -70,8 +70,26 @@ export const connectDB = async (retries = 3): Promise<void> => {
  *
  * `asPromise()` resolves when the connection is actually open.
  */
-export const ensureDbReady = async (): Promise<void> => {
+export const ensureDbReady = async (timeoutMs = 10_000): Promise<void> => {
   await connectDB();
   if (mongoose.connection.readyState === 1) return;
-  await mongoose.connection.asPromise();
+
+  // Bounded wait. This sits on the hot path for every API request, so a
+  // pathological state must surface as an error the handler can turn into a 5xx
+  // rather than a request that hangs until the platform kills it. The budget
+  // matches serverSelectionTimeoutMS above.
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      mongoose.connection.asPromise(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Database connection not ready after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 };

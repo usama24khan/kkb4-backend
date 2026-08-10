@@ -45,13 +45,19 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(generalLimiter);
 
-// Ensure DB is connected before processing any API request.
-// connectDB() is idempotent — warm invocations return immediately.
-// This eliminates the race condition on Vercel cold starts where bootstrap()
-// fires async but the first request arrives before the connection is ready.
+// Ensure the DB is genuinely usable before processing any API request.
+//
+// This used to call connectDB(), which returns as soon as its module-level flag
+// and readyState agree — not the same as connected. On Vercel an instance can be
+// resumed with a dead socket, or a connect can still be in flight, and because
+// OPTS sets `bufferCommands: false` a query issued in that window throws
+// "Cannot call `x.findOne()` before initial connection is complete" instead of
+// waiting. That was observed on the shareable document pages; the same race
+// applies to every route here. ensureDbReady() waits for the connection to be
+// open, with a timeout so a bad state fails fast instead of hanging.
 app.use("/api", async (req, res, next) => {
   try {
-    await connectDB();
+    await ensureDbReady();
     next();
   } catch (err) {
     next(err);
