@@ -185,8 +185,14 @@ export const renderDocumentPage = async (req: Request, res: Response): Promise<v
           <p class="note">If the document doesn&rsquo;t appear above, tap &ldquo;Open PDF&rdquo;.</p>`,
       }),
     );
-  } catch {
+  } catch (err) {
     // Even a server-side failure returns a valid, previewable page.
+    console.error('[documentPage] render failed:', err);
+    // Surface the reason outside production so this is diagnosable from a
+    // response header without shipping internals to residents.
+    if (process.env.NODE_ENV !== 'production') {
+      res.set('x-kkb4-error', String((err as Error)?.message || err).slice(0, 200));
+    }
     res.set('Content-Type', 'text/html; charset=utf-8');
     res.status(200).send(
       renderHtml(pageUrl, {
