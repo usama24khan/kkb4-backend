@@ -21,6 +21,13 @@ export const env = {
   JWT_REFRESH_EXPIRES_IN: process.env.JWT_REFRESH_EXPIRES_IN || "7d",
   ADMIN_EMAIL: process.env.ADMIN_EMAIL || "admin@kkb4.com",
   ADMIN_DEFAULT_PASSWORD: process.env.ADMIN_DEFAULT_PASSWORD || "Admin@1234",
+
+  // ── User portal (resident-facing app) ─────────────────────────────────────
+  // One shared read-only account for the whole society: every resident signs in
+  // with the same credentials, then browses the full plot registry. Rotate by
+  // setting these env vars — no code change needed.
+  USER_PORTAL_EMAIL: process.env.USER_PORTAL_EMAIL || "user@kkb4.com",
+  USER_PORTAL_PASSWORD: process.env.USER_PORTAL_PASSWORD || "User@1234",
   NODE_ENV: process.env.NODE_ENV || "development",
   CORS_ORIGINS: (
     process.env.CORS_ORIGINS || "http://localhost:3000,http://localhost:3001"

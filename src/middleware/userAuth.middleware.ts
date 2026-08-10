@@ -1,19 +1,20 @@
 import { Request, Response, NextFunction } from 'express';
 import { verifyAccessToken } from '../utils/jwt';
 
-export interface ResidentAuthRequest extends Request {
-  resident?: {
-    plotId: string;
+export interface UserAuthRequest extends Request {
+  portalUser?: {
+    email: string;
     role: string;
   };
 }
 
 /**
- * Authenticates a resident bearer token. The token must have role='resident'
- * and a plotId. Sets req.resident on success.
+ * Authenticates a user-portal bearer token — the single shared account every
+ * resident signs in with. Tokens carry role='user'; admin tokens are rejected
+ * here so the two audiences stay clearly separated.
  */
-export const residentAuthMiddleware = (
-  req: ResidentAuthRequest,
+export const userAuthMiddleware = (
+  req: UserAuthRequest,
   res: Response,
   next: NextFunction,
 ): void => {
@@ -27,12 +28,12 @@ export const residentAuthMiddleware = (
     const token = authHeader.split(' ')[1];
     const decoded = verifyAccessToken(token);
 
-    if (decoded.role !== 'resident' || !decoded.plotId) {
-      res.status(403).json({ success: false, message: 'Resident token required' });
+    if (decoded.role !== 'user') {
+      res.status(403).json({ success: false, message: 'User portal token required' });
       return;
     }
 
-    req.resident = { plotId: decoded.plotId, role: decoded.role };
+    req.portalUser = { email: decoded.email, role: decoded.role };
     next();
   } catch {
     res.status(401).json({ success: false, message: 'Invalid or expired token' });

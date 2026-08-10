@@ -11,7 +11,8 @@ import importRoutes from './import.routes';
 import analyticsRoutes from './analytics.routes';
 import configRoutes from './config.routes';
 import auditLogRoutes from './auditLog.routes';
-import residentAuthRoutes from './residentAuth.routes';
+import userAuthRoutes from './userAuth.routes';
+import complaintRoutes from './complaint.routes';
 
 const router = Router();
 
@@ -27,7 +28,8 @@ router.use('/import', importRoutes);
 router.use('/analytics', analyticsRoutes);
 router.use('/config', configRoutes);
 router.use('/audit-log', auditLogRoutes);
-router.use('/resident-auth', residentAuthRoutes);
+router.use('/user-auth', userAuthRoutes);
+router.use('/complaints', complaintRoutes);
 
 // Health check
 router.get('/health', (_req, res) => {
