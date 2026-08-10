@@ -38,6 +38,9 @@ export const getReceipts = async (req: Request, res: Response): Promise<void> =>
         .sort({ createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
+        // ownerPhone rides along so the admin UI can offer "Send via WhatsApp"
+        // without a second request per row.
+        .populate("plotRef", "plotBlock ownerName ownerPhone")
         .populate("generatedBy", "name email")
         .lean(),
       Receipt.countDocuments(filter),
@@ -127,7 +130,7 @@ export const createReceipt = async (req: AuthRequest, res: Response): Promise<vo
 export const getReceipt = async (req: Request, res: Response): Promise<void> => {
   try {
     const receipt = await Receipt.findById(req.params.id)
-      .populate("plotRef", "plotBlock ownerName block plotNumber")
+      .populate("plotRef", "plotBlock ownerName ownerPhone block plotNumber")
       .populate("generatedBy", "name email")
       .lean();
     if (!receipt) {

@@ -396,33 +396,53 @@ export const getNoticeHistory = async (req: Request, res: Response): Promise<voi
     // Block/phase notices already have human-readable targetId (e.g. "A").
     const idsToResolve = new Set<string>();
     for (const n of notices) {
-      if (n.targetLabel) continue;
       if (n.type !== 'plot') continue;
       const ids = String(n.targetId).split(',').map((s) => s.trim()).filter(Boolean);
-      // We only need the first id of each notice for the label.
+      // The first id covers the label; for single-plot notices it is also the
+      // recipient we attach contact details for (see `recipient` below).
       if (ids[0]) idsToResolve.add(ids[0]);
     }
 
     let plotLookup: Record<string, string> = {};
+    let contactLookup: Record<string, { name: string; phone: string }> = {};
     if (idsToResolve.size > 0) {
       const plots = await Plot.find(
         { _id: { $in: Array.from(idsToResolve) } },
-        { _id: 1, plotBlock: 1 },
+        { _id: 1, plotBlock: 1, ownerName: 1, ownerPhone: 1 },
       ).lean();
       plotLookup = Object.fromEntries(plots.map((p) => [String(p._id), p.plotBlock]));
+      contactLookup = Object.fromEntries(
+        plots.map((p) => [
+          String(p._id),
+          { name: p.ownerName || '', phone: p.ownerPhone || '' },
+        ]),
+      );
     }
 
     const enriched = notices.map((n) => {
-      if (n.targetLabel) return n;
-      if (n.type === 'plot') {
-        const ids = String(n.targetId).split(',').map((s) => s.trim()).filter(Boolean);
+      const ids =
+        n.type === 'plot'
+          ? String(n.targetId).split(',').map((s) => s.trim()).filter(Boolean)
+          : [];
+
+      // Contact details for the ONE recipient of a single-plot notice, so the
+      // admin UI can offer "Send via WhatsApp". Block/phase notices and
+      // multi-plot selections cover many owners, so there is no single number to
+      // address and `recipient` is deliberately omitted.
+      const recipient =
+        n.type === 'plot' && ids.length === 1 ? contactLookup[ids[0]] : undefined;
+
+      let targetLabel = n.targetLabel;
+      if (!targetLabel) {
         const first = ids[0] ? plotLookup[ids[0]] : undefined;
-        if (first) {
-          const label = ids.length > 1 ? `${first} +${ids.length - 1} more` : first;
-          return { ...n, targetLabel: label };
-        }
+        targetLabel = first
+          ? ids.length > 1
+            ? `${first} +${ids.length - 1} more`
+            : first
+          : n.targetId;
       }
-      return { ...n, targetLabel: n.targetId };
+
+      return { ...n, targetLabel, ...(recipient ? { recipient } : {}) };
     });
 
     res.json({
