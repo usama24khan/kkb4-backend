@@ -11,6 +11,7 @@ import type { UploadApiResponse } from "cloudinary";
 import {
   cloudinary,
   RESOURCE_TYPE,
+  THUMBNAIL_RESOURCE_TYPE,
   isCloudinaryConfigured,
   withFolder,
 } from "./cloudinary";
@@ -66,7 +67,51 @@ export async function uploadToCloudinary(
     }
   });
 
+  // Best-effort second copy so link previews can show page 1. Never allowed to
+  // fail the caller: a missing thumbnail degrades the preview card, whereas a
+  // thrown error here would lose the notice/receipt the admin just generated.
+  void uploadPdfThumbnailSource(source, publicId);
+
   return result.secure_url;
+}
+
+/**
+ * Upload the same PDF bytes again as an `image` resource under the identical
+ * public_id, which is what lets Cloudinary rasterise page 1 for `og:image`
+ * (see THUMBNAIL_RESOURCE_TYPE for why a second copy is required).
+ *
+ * Resolves to true on success. Swallows every error by design — the caller
+ * treats the thumbnail as optional.
+ */
+export async function uploadPdfThumbnailSource(
+  source: Buffer | string,
+  publicId: string,
+): Promise<boolean> {
+  if (!isCloudinaryConfigured()) return false;
+
+  try {
+    const buf = Buffer.isBuffer(source) ? source : fs.readFileSync(source);
+    await new Promise<void>((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          resource_type: THUMBNAIL_RESOURCE_TYPE,
+          public_id: publicId,
+          use_filename: false,
+          unique_filename: false,
+          overwrite: true,
+        },
+        (err, res) => (err || !res ? reject(err || new Error("thumbnail upload failed")) : resolve()),
+      );
+      stream.end(buf);
+    });
+    return true;
+  } catch (err) {
+    console.warn(
+      `Thumbnail source upload failed for ${publicId} — link previews will use the ` +
+        `placeholder image. ${err instanceof Error ? err.message : err}`,
+    );
+    return false;
+  }
 }
 
 export default uploadToCloudinary;

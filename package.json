@@ -13,7 +13,9 @@
     "migrate:phases": "NODE_ENV=development ts-node src/scripts/migratePhases.ts",
     "migrate:phases:dry": "NODE_ENV=development ts-node src/scripts/migratePhases.ts --dry",
     "backfill:complaint-tracking": "NODE_ENV=development ts-node src/scripts/backfillComplaintTracking.ts",
-    "backfill:complaint-tracking:dry": "NODE_ENV=development ts-node src/scripts/backfillComplaintTracking.ts --dry"
+    "backfill:complaint-tracking:dry": "NODE_ENV=development ts-node src/scripts/backfillComplaintTracking.ts --dry",
+    "backfill:pdf-thumbnails": "NODE_ENV=development ts-node src/scripts/backfillPdfThumbnails.ts",
+    "backfill:pdf-thumbnails:dry": "NODE_ENV=development ts-node src/scripts/backfillPdfThumbnails.ts --dry"
   },
   "dependencies": {
     "@fontsource/noto-naskh-arabic": "^5.2.11",
