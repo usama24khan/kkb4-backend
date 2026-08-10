@@ -5,6 +5,7 @@ import fs from "fs";
 import { connectDB } from "./config/db";
 import { env } from "./config/env";
 import routes from "./routes";
+import { renderDocumentPage } from "./controllers/documentPage.controller";
 import { errorHandler } from "./middleware/errorHandler";
 import { generalLimiter } from "./middleware/rateLimiter";
 import { ensureDefaultAdmin } from "./controllers/auth.controller";
@@ -59,6 +60,21 @@ app.use("/api", async (req, res, next) => {
 
 // API Routes
 app.use("/api", routes);
+
+// ── Shareable document landing pages (outside /api) ─────────────────────────
+// Served here rather than from the Next.js portal because link-preview crawlers
+// send no cookies, and Vercel Deployment Protection answers cookie-less requests
+// to a protected deployment with a 302 to its SSO page — so a crawler would
+// preview Vercel's login screen. This backend is public in every environment,
+// which also makes a preview-deployment test a valid proof of production.
+app.get("/view/:kind/:id", async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    next(err);
+  }
+}, renderDocumentPage);
 
 // Error handler
 app.use(errorHandler);

@@ -112,6 +112,21 @@ async function buildNotice(id: string): Promise<PublicDocument | null> {
 }
 
 /**
+ * Look up a document's public metadata, or null when the kind/id is invalid or
+ * no such document exists. Shared by the JSON endpoint and the HTML landing page.
+ */
+export async function getPublicDocumentData(
+  kindRaw: string,
+  id: string,
+): Promise<PublicDocument | null> {
+  const kind = String(kindRaw || '').toLowerCase();
+  if (kind !== 'receipt' && kind !== 'notice') return null;
+  // Reject anything that isn't an ObjectId before hitting the database.
+  if (!/^[a-f\d]{24}$/i.test(id)) return null;
+  return kind === 'receipt' ? buildReceipt(id) : buildNotice(id);
+}
+
+/**
  * GET /public/documents/:kind/:id — Metadata for the shareable landing page.
  */
 export const getPublicDocument = async (req: Request, res: Response): Promise<void> => {
@@ -123,13 +138,8 @@ export const getPublicDocument = async (req: Request, res: Response): Promise<vo
       sendError(res, 'Unknown document type', 404);
       return;
     }
-    // Reject anything that isn't an ObjectId before hitting the database.
-    if (!/^[a-f\d]{24}$/i.test(id)) {
-      sendError(res, 'Document not found', 404);
-      return;
-    }
 
-    const doc = kind === 'receipt' ? await buildReceipt(id) : await buildNotice(id);
+    const doc = await getPublicDocumentData(kind, id);
     if (!doc) {
       sendError(res, 'Document not found', 404);
       return;
