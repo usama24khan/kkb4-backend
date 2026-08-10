@@ -83,8 +83,8 @@ export const FIELDS: Record<CollectionName, string[]> = {
   years: ['_id', 'year', 'mcRate', 'isActive', 'notes', 'createdAt', 'updatedAt'],
   monthlyrates: ['_id', 'year', 'rate', 'updatedAt'],
   complaints: [
-    '_id', 'name', 'mobile', 'message', 'status', 'resolvedAt',
-    'createdAt', 'updatedAt',
+    '_id', 'trackingNumber', 'trackingNumericId', 'year', 'name', 'mobile',
+    'message', 'status', 'resolvedAt', 'createdAt', 'updatedAt',
   ],
 };
 
@@ -191,7 +191,8 @@ export const SCHEMA_PROMPT = `You translate an admin's question about the KKB4 h
 - phases: name, isActive
 - years: year, mcRate, isActive, notes
 - monthlyrates: year, rate
-- complaints: name, mobile, message, status ("pending"|"in_progress"|"resolved"), createdAt
+- complaints: trackingNumber ("CMP-2026-0001"), name, mobile, message,
+  status ("pending"|"in_progress"|"resolved"), resolvedAt, createdAt
 
 ## Operations — pick exactly one
 

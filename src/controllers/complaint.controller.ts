@@ -42,20 +42,75 @@ export const createComplaint = async (req: Request, res: Response): Promise<void
       return;
     }
 
-    const complaint = await Complaint.create({
-      name: cleanName,
-      mobile: cleanMobile,
-      message: cleanMessage,
-    });
+    // Numbering is allocated atomically (see models/Counter.ts), so collisions
+    // shouldn't happen. This retry stays purely as a backstop in case the unique
+    // index is hit some other way — e.g. a counter reset by hand.
+    let complaint = null;
+    for (let attempt = 0; attempt < 4 && !complaint; attempt++) {
+      try {
+        complaint = await Complaint.create({
+          name: cleanName,
+          mobile: cleanMobile,
+          message: cleanMessage,
+          status: 'pending',
+          statusHistory: [{ status: 'pending', at: new Date() }],
+        });
+      } catch (err: any) {
+        const isDuplicate = err?.code === 11000;
+        if (!isDuplicate || attempt === 3) throw err;
+      }
+    }
 
     sendSuccess(
       res,
-      { id: complaint._id, createdAt: complaint.createdAt },
+      {
+        id: complaint!._id,
+        trackingNumber: complaint!.trackingNumber,
+        status: complaint!.status,
+        createdAt: complaint!.createdAt,
+      },
       'Complaint submitted',
       201,
     );
   } catch (error: any) {
     sendError(res, 'Failed to submit complaint', 500, error.message);
+  }
+};
+
+/**
+ * GET /complaints/track/:trackingNumber — Public status lookup for residents.
+ *
+ * Tracking numbers are sequential and therefore guessable, so this deliberately
+ * omits the complainant's mobile number: walking CMP-2026-0001, -0002, … must
+ * not turn into a harvest of residents' phone numbers. Status, dates, and the
+ * complaint text are returned so the resident can confirm it's theirs.
+ */
+export const trackComplaint = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const raw = String(req.params.trackingNumber || '').trim().toUpperCase();
+    if (!raw) {
+      sendError(res, 'A tracking number is required', 400);
+      return;
+    }
+
+    // Accept "CMP-2026-0001", "cmp 2026 0001", or a bare "1" for the current year.
+    let trackingNumber = raw.replace(/\s+/g, '-');
+    if (/^\d+$/.test(trackingNumber)) {
+      trackingNumber = `CMP-${new Date().getFullYear()}-${trackingNumber.padStart(4, '0')}`;
+    }
+
+    const complaint = await Complaint.findOne({ trackingNumber })
+      .select('trackingNumber name message status statusHistory resolvedAt createdAt updatedAt')
+      .lean();
+
+    if (!complaint) {
+      sendError(res, `No complaint found with tracking number ${trackingNumber}`, 404);
+      return;
+    }
+
+    sendSuccess(res, complaint, 'Complaint found');
+  } catch (error: any) {
+    sendError(res, 'Failed to look up that complaint', 500, error.message);
   }
 };
 
@@ -74,7 +129,7 @@ export const getComplaints = async (req: Request, res: Response): Promise<void> 
     if (status && STATUSES.includes(status as ComplaintStatus)) filter.status = status;
     if (search) {
       const rx = { $regex: escapeRegex(search), $options: 'i' };
-      filter.$or = [{ name: rx }, { mobile: rx }, { message: rx }];
+      filter.$or = [{ name: rx }, { mobile: rx }, { message: rx }, { trackingNumber: rx }];
     }
 
     const [items, total, counts] = await Promise.all([
@@ -124,9 +179,15 @@ export const updateComplaintStatus = async (req: AuthRequest, res: Response): Pr
       return;
     }
 
+    // Append to statusHistory so the resident's tracking view shows progress
+    // rather than just the latest state.
     const complaint = await Complaint.findByIdAndUpdate(
       req.params.id,
-      { status, resolvedAt: status === 'resolved' ? new Date() : null },
+      {
+        status,
+        resolvedAt: status === 'resolved' ? new Date() : null,
+        $push: { statusHistory: { status, at: new Date() } },
+      },
       { new: true },
     );
 
