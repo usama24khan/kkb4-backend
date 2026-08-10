@@ -149,7 +149,7 @@ export const renderDocumentPage = async (req: Request, res: Response): Promise<v
     res.set('Cache-Control', 'public, max-age=300');
 
     if (!doc) {
-      res.set('x-kkb4-stage', 'not-found');
+      if (process.env.NODE_ENV !== 'production') res.set('x-kkb4-stage', 'not-found');
       res.status(200).send(
         renderHtml(pageUrl, {
           title: 'Document unavailable',
@@ -166,7 +166,7 @@ export const renderDocumentPage = async (req: Request, res: Response): Promise<v
     }
 
     if (!doc.pdfAvailable) {
-      res.set('x-kkb4-stage', 'no-pdf');
+      if (process.env.NODE_ENV !== 'production') res.set('x-kkb4-stage', 'no-pdf');
       res.status(200).send(
         renderHtml(pageUrl, {
           title: doc.title,
@@ -203,9 +203,12 @@ export const renderDocumentPage = async (req: Request, res: Response): Promise<v
     console.error('[documentPage] render failed:', err);
     // Surface the reason outside production so this is diagnosable from a
     // response header without shipping internals to residents.
-    // TEMPORARY: ungated while diagnosing the preview failure.
-    res.set('x-kkb4-error', String((err as Error)?.message || err).slice(0, 300));
-    res.set('x-kkb4-stage', 'catch');
+    // Reason echoed in a header outside production, so a failure here is
+    // diagnosable without shipping internals to residents.
+    if (process.env.NODE_ENV !== 'production') {
+      res.set('x-kkb4-error', String((err as Error)?.message || err).slice(0, 300));
+      res.set('x-kkb4-stage', 'catch');
+    }
     res.set('Content-Type', 'text/html; charset=utf-8');
     res.status(200).send(
       renderHtml(pageUrl, {
