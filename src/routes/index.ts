@@ -13,6 +13,7 @@ import configRoutes from './config.routes';
 import auditLogRoutes from './auditLog.routes';
 import userAuthRoutes from './userAuth.routes';
 import complaintRoutes from './complaint.routes';
+import aiQueryRoutes from './aiQuery.routes';
 
 const router = Router();
 
@@ -30,6 +31,7 @@ router.use('/config', configRoutes);
 router.use('/audit-log', auditLogRoutes);
 router.use('/user-auth', userAuthRoutes);
 router.use('/complaints', complaintRoutes);
+router.use('/ai', aiQueryRoutes);
 
 // Health check
 router.get('/health', (_req, res) => {

@@ -40,6 +40,12 @@ export const env = {
   // Optional top-level folder PDFs are stored under (e.g. "kkb4").
   CLOUDINARY_FOLDER: process.env.CLOUDINARY_FOLDER || "",
 
+  // ── AI database chat (admin-only, read-only) ──────────────────────────────
+  // Groq powers the natural-language → query translation. Free key at
+  // https://console.groq.com — leave blank to disable the feature entirely.
+  GROQ_API_KEY: process.env.GROQ_API_KEY || "",
+  GROQ_MODEL: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+
   // ── OTP email (Gmail via nodemailer) ──────────────────────────────────────
   // Gmail account the OTP is sent FROM + a 16-char Gmail App Password.
   EMAIL_FROM: process.env.EMAIL_FROM || "",
