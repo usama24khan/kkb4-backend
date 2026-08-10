@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { getPublicDocumentData } from './publicDocument.controller';
+import { ensureDbReady } from '../config/db';
 
 /**
  * Server-rendered landing page for a notice or receipt — the URL we put in
@@ -128,10 +129,20 @@ export const renderDocumentPage = async (req: Request, res: Response): Promise<v
   const pageUrl = selfUrl(req);
 
   try {
-    const doc = await getPublicDocumentData(
-      String(req.params.kind || ''),
-      String(req.params.id || ''),
-    );
+    const kind = String(req.params.kind || '');
+    const id = String(req.params.id || '');
+
+    let doc;
+    try {
+      doc = await getPublicDocumentData(kind, id);
+    } catch (err) {
+      // One retry for the cold/resumed-instance connection race. Worth the extra
+      // round trip: a crawler caches the first card it receives, so a transient
+      // failure here would persist in WhatsApp long after the cause is gone.
+      console.warn('[documentPage] first lookup failed, retrying:', (err as Error)?.message);
+      await ensureDbReady();
+      doc = await getPublicDocumentData(kind, id);
+    }
 
     res.set('Content-Type', 'text/html; charset=utf-8');
     // Crawlers refetch these repeatedly; documents never change once generated.

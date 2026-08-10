@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import path from "path";
 import fs from "fs";
-import { connectDB } from "./config/db";
+import { connectDB, ensureDbReady } from "./config/db";
 import { env } from "./config/env";
 import routes from "./routes";
 import { renderDocumentPage } from "./controllers/documentPage.controller";
@@ -69,7 +69,9 @@ app.use("/api", routes);
 // which also makes a preview-deployment test a valid proof of production.
 app.get("/view/:kind/:id", async (req, res, next) => {
   try {
-    await connectDB();
+    // ensureDbReady (not connectDB) — this page must not fail on a cold or
+    // resumed instance, because a crawler caches whatever card it first sees.
+    await ensureDbReady();
     next();
   } catch (err) {
     next(err);

@@ -56,3 +56,22 @@ export const connectDB = async (retries = 3): Promise<void> => {
     }
   }
 };
+
+/**
+ * Await a connection that is genuinely usable.
+ *
+ * `connectDB()` returns as soon as its module-level flag and readyState agree,
+ * but on Vercel an instance can be frozen and resumed with a dead socket, or a
+ * connect can still be in flight — and because OPTS sets `bufferCommands: false`,
+ * a query issued in that window throws
+ * "Cannot call `x.findOne()` before initial connection is complete"
+ * instead of waiting. Observed on the shareable document pages, where one such
+ * failure is costly: a link-preview crawler caches the broken card.
+ *
+ * `asPromise()` resolves when the connection is actually open.
+ */
+export const ensureDbReady = async (): Promise<void> => {
+  await connectDB();
+  if (mongoose.connection.readyState === 1) return;
+  await mongoose.connection.asPromise();
+};
