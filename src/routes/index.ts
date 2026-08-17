@@ -15,6 +15,7 @@ import userAuthRoutes from './userAuth.routes';
 import complaintRoutes from './complaint.routes';
 import aiQueryRoutes from './aiQuery.routes';
 import publicDocumentRoutes from './publicDocument.routes';
+import financeRoutes from './finance.routes';
 
 const router = Router();
 
@@ -34,6 +35,7 @@ router.use('/user-auth', userAuthRoutes);
 router.use('/complaints', complaintRoutes);
 router.use('/ai', aiQueryRoutes);
 router.use('/public', publicDocumentRoutes);
+router.use('/finance', financeRoutes);
 
 // Health check
 router.get('/health', (_req, res) => {

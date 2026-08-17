@@ -33,6 +33,14 @@ export interface IReceipt extends Document {
   // Meta
   societyName: string;          // Default: "KKB Housing Society"
   isVerified: boolean;          // Admin-generated receipts default to true
+  // Cash-book linkage. Set when the receipt was produced by the "record
+  // payment" flow, which also writes a Collection ledger entry and clears the
+  // plot's dues months. Older standalone receipts leave this null.
+  collectionRef?: Types.ObjectId | null;
+  // Set when the underlying collection is voided. The receipt is kept (its
+  // number was already handed to the owner) but is no longer valid.
+  isVoided: boolean;
+  voidReason: string;
   // Full Cloudinary URL of the rendered PDF. Empty until the PDF is first
   // generated (lazily, on the first /receipts/:id/pdf request) and cached.
   filePath: string;
@@ -61,6 +69,9 @@ const ReceiptSchema = new Schema<IReceipt>(
 
     societyName: { type: String, default: "KKB Housing Society", trim: true },
     isVerified: { type: Boolean, default: true },
+    collectionRef: { type: Schema.Types.ObjectId, ref: "Collection", default: null },
+    isVoided: { type: Boolean, default: false },
+    voidReason: { type: String, default: "", trim: true },
     filePath: { type: String, default: "" }, // Cloudinary PDF URL (lazy cache)
     generatedBy: { type: Schema.Types.ObjectId, ref: "Admin", default: null },
   },

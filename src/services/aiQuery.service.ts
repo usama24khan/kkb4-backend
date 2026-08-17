@@ -56,6 +56,23 @@ export interface AiQueryResult {
 
 // ── Groq ────────────────────────────────────────────────────────────────────
 
+/**
+ * Reasoning models (Groq's gpt-oss family) spend part of the completion budget on
+ * hidden reasoning tokens before writing any answer. Two consequences this code
+ * has to allow for:
+ *
+ *  - reasoning counts against `max_tokens`, so a tight budget returns
+ *    `content: ""` with `finish_reason: "length"` — the answer never gets written
+ *  - those tokens also count against the account's tokens-per-minute allowance
+ *
+ * So we ask for the cheapest useful reasoning and leave headroom on top of the
+ * caller's budget. Non-reasoning models ignore both adjustments.
+ */
+const isReasoningModel = (model: string) => /gpt-oss/i.test(model);
+
+/** Extra completion room for a reasoning model's hidden tokens. */
+const REASONING_HEADROOM = 700;
+
 async function callGroq(
   messages: { role: string; content: string }[],
   opts: { json?: boolean; maxTokens?: number } = {},
@@ -67,6 +84,7 @@ async function callGroq(
     );
   }
 
+  const reasoning = isReasoningModel(env.GROQ_MODEL);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);
 
@@ -81,7 +99,8 @@ async function callGroq(
         model: env.GROQ_MODEL,
         messages,
         temperature: 0,
-        max_tokens: opts.maxTokens ?? 900,
+        max_tokens: (opts.maxTokens ?? 900) + (reasoning ? REASONING_HEADROOM : 0),
+        ...(reasoning ? { reasoning_effort: 'low' } : {}),
         ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
       }),
       signal: controller.signal,
@@ -99,8 +118,18 @@ async function callGroq(
     }
 
     const data: any = await res.json();
-    const content = data?.choices?.[0]?.message?.content;
+    const choice = data?.choices?.[0];
+    const content = choice?.message?.content;
     if (typeof content !== 'string' || !content.trim()) {
+      // A reasoning model that hits the ceiling mid-thought returns empty content
+      // with finish_reason "length". Rephrasing won't help there, so say what
+      // actually happened rather than sending the admin round in circles.
+      if (choice?.finish_reason === 'length') {
+        throw new AiQueryError(
+          'The AI ran out of room before answering — try a narrower question.',
+          502,
+        );
+      }
       throw new AiQueryError('Groq returned an empty response — try rephrasing.', 502);
     }
     return content;

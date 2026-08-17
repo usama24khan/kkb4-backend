@@ -181,13 +181,23 @@ export class PaymentService {
     return payment.save();
   }
 
+  /**
+   * Set one month's amount for many plots in a single year.
+   *
+   * Alongside the saved records it reports the *increase* per plot
+   * (`deltas`) — the grid overwrites bucket values, so the difference against
+   * what was there before is the only honest measure of "money newly recorded".
+   * The caller uses it to write cash-book entries when the admin is entering
+   * money received today rather than backfilling history.
+   */
   static async bulkUpdate(entries: Array<{ plotId: string; amount: number }>, year: number, month: string) {
     const results = [];
+    const deltas: Array<{ plotId: string; allocations: Array<{ year: number; month: string; amount: number }> }> = [];
     const defaultRate = getMcRateForYear(year);
 
     for (const entry of entries) {
       let payment = await Payment.findOne({ plot: entry.plotId, year });
-      
+
       if (!payment) {
         payment = new Payment({
           plot: entry.plotId,
@@ -195,6 +205,12 @@ export class PaymentService {
           mcRate: defaultRate,
           payments: {},
         });
+      }
+
+      const before = Number((payment.payments as any)[month]) || 0;
+      const increase = (Number(entry.amount) || 0) - before;
+      if (increase > 0) {
+        deltas.push({ plotId: entry.plotId, allocations: [{ year, month, amount: increase }] });
       }
 
       (payment.payments as any)[month] = entry.amount;
@@ -214,19 +230,24 @@ export class PaymentService {
       results.push(saved);
     }
 
-    return results;
+    return { results, deltas };
   }
 
   /**
    * Bulk-upsert the full month map for many plots in a single year. Each entry
    * carries a partial `payments` object; only the months present are written
    * (an explicit null clears a month). Used by the "All months" grid editor.
+   *
+   * Returns the per-plot increases as well (see {@link bulkUpdate}) so the
+   * caller can turn them into cash-book entries when the admin is recording
+   * money received rather than backfilling old records.
    */
   static async bulkUpsertMonths(
     entries: Array<{ plotId: string; payments: Record<string, number | null> }>,
     year: number,
   ) {
     const results = [];
+    const deltas: Array<{ plotId: string; allocations: Array<{ year: number; month: string; amount: number }> }> = [];
     const defaultRate = getMcRateForYear(year);
 
     for (const entry of entries) {
@@ -240,18 +261,23 @@ export class PaymentService {
         });
       }
 
+      const increases: Array<{ year: number; month: string; amount: number }> = [];
       for (const m of MONTHS) {
         const v = (entry.payments || {})[m];
         if (v === undefined) continue;
-        (payment.payments as any)[m] =
-          v === null || (v as any) === '' ? null : Number(v) || 0;
+        const before = Number((payment.payments as any)[m]) || 0;
+        const next = v === null || (v as any) === '' ? null : Number(v) || 0;
+        const increase = (next || 0) - before;
+        if (increase > 0) increases.push({ year, month: m, amount: increase });
+        (payment.payments as any)[m] = next;
       }
+      if (increases.length) deltas.push({ plotId: entry.plotId, allocations: increases });
 
       recalcTotals(payment);
       results.push(await payment.save());
     }
 
-    return results;
+    return { results, deltas };
   }
 
   static async getPaymentsByBlock(block: string, year: number) {

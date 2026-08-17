@@ -29,6 +29,10 @@ export const env = {
   USER_PORTAL_EMAIL: process.env.USER_PORTAL_EMAIL || "user@kkb4.com",
   USER_PORTAL_PASSWORD: process.env.USER_PORTAL_PASSWORD || "User@1234",
   NODE_ENV: process.env.NODE_ENV || "development",
+
+  // Requests allowed per IP per 15 minutes across /api (see middleware/rateLimiter).
+  // Raise it locally when a test run replays hundreds of requests from one address.
+  RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX || "600", 10),
   CORS_ORIGINS: (
     process.env.CORS_ORIGINS || "http://localhost:3000,http://localhost:3001"
   ).split(","),
@@ -44,7 +48,14 @@ export const env = {
   // Groq powers the natural-language → query translation. Free key at
   // https://console.groq.com — leave blank to disable the feature entirely.
   GROQ_API_KEY: process.env.GROQ_API_KEY || "",
-  GROQ_MODEL: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+  // llama-3.3-70b-versatile was decommissioned by Groq on 2026-08-16 and now
+  // 404s, so the default moved to the replacement they recommend. gpt-oss-120b
+  // is a *reasoning* model — see aiQuery.service for the two accommodations that
+  // requires (reasoning_effort and token headroom).
+  //
+  // qwen3.6-27b is the other suggested replacement but is not a drop-in here: it
+  // fails this app's `response_format: json_object` requests outright.
+  GROQ_MODEL: process.env.GROQ_MODEL || "openai/gpt-oss-120b",
 
   // ── OTP email (Gmail via nodemailer) ──────────────────────────────────────
   // Gmail account the OTP is sent FROM + a 16-char Gmail App Password.

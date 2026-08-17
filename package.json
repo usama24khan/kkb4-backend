@@ -14,6 +14,10 @@
     "migrate:phases:dry": "NODE_ENV=development ts-node src/scripts/migratePhases.ts --dry",
     "backfill:complaint-tracking": "NODE_ENV=development ts-node src/scripts/backfillComplaintTracking.ts",
     "backfill:complaint-tracking:dry": "NODE_ENV=development ts-node src/scripts/backfillComplaintTracking.ts --dry",
+    "seed:demo-finance": "NODE_ENV=development ts-node src/scripts/seedDemoFinance.ts",
+    "seed:demo-finance:clean": "NODE_ENV=development ts-node src/scripts/seedDemoFinance.ts --clean",
+    "backfill:finance-ledger": "NODE_ENV=development ts-node src/scripts/backfillFinanceLedger.ts",
+    "backfill:finance-ledger:dry": "NODE_ENV=development ts-node src/scripts/backfillFinanceLedger.ts --dry",
     "backfill:pdf-thumbnails": "NODE_ENV=development ts-node src/scripts/backfillPdfThumbnails.ts",
     "backfill:pdf-thumbnails:dry": "NODE_ENV=development ts-node src/scripts/backfillPdfThumbnails.ts --dry"
   },

@@ -16,7 +16,7 @@ one-line answer plus a results table.
 ## Request flow
 
 1. Admin sends a question to `POST /api/ai/query`.
-2. Groq (`llama-3.3-70b-versatile`, free tier) receives the schema description
+2. Groq (`openai/gpt-oss-120b`, free tier) receives the schema description
    and returns **JSON only** — never a query string, never code.
 3. The JSON names one of four read-only operations and supplies parameters.
 4. `aiQuery.service.ts` validates every collection, field path, and operator in
@@ -130,6 +130,29 @@ Set `GROQ_API_KEY` (free, no card: https://console.groq.com). Optionally
 override `GROQ_MODEL`. With no key set, `GET /api/ai/capabilities` reports
 `configured: false` and the UI shows a setup notice rather than failing on the
 first question.
+
+### Choosing a model
+
+The default is `openai/gpt-oss-120b`, Groq's recommended replacement for
+`llama-3.3-70b-versatile` (decommissioned 2026-08-16).
+
+Two things to know before switching it:
+
+- **JSON mode is mandatory here.** The planner asks for
+  `response_format: json_object`; a model that cannot honour that is unusable.
+  `qwen/qwen3.6-27b` — the other suggested replacement — fails these requests
+  with "Failed to generate JSON", so it is not an option without rewriting the
+  planner to parse free text.
+- **Reasoning models need headroom.** The gpt-oss family spends completion
+  tokens on hidden reasoning before answering, so `callGroq` sends
+  `reasoning_effort: 'low'` and adds `REASONING_HEADROOM` to `max_tokens`.
+  Without that, a hard question returns empty content with
+  `finish_reason: "length"`. `gpt-oss-20b` is cheaper and faster but answered a
+  simple plot count wrongly in testing, so 120b is the default.
+
+The free tier's ceiling is tokens-per-minute (8,000 at the time of writing), not
+requests. Each question costs up to two model calls, so a few questions in quick
+succession can hit a 429; the UI surfaces that as a rate-limit message.
 
 ## Follow-up recommended: read-only Mongo user
 

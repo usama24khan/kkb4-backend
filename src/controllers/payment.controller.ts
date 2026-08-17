@@ -4,6 +4,64 @@ import { updatePaymentSchema, bulkPaymentSchema } from '../validations/payment.v
 import { sendSuccess, sendError } from '../utils/responseHelper';
 import AuditLog from '../models/AuditLog';
 import { AuthRequest } from '../middleware/auth.middleware';
+import { recordCollection } from '../services/finance.service';
+
+/**
+ * How a bulk grid save should be treated by the cash book.
+ *
+ * `historical` (the default) is pure data entry: month buckets are written and
+ * nothing reaches the cash book, which is what backfilling 2012-onwards records
+ * requires — that money was collected and spent years ago.
+ *
+ * `live` means the admin is entering money taken today, so each *increase* in a
+ * month bucket also becomes a ledger entry counted in the current month. No
+ * receipts are issued here; single payments that need one go through
+ * POST /finance/collections instead.
+ */
+type GridMode = 'historical' | 'live';
+
+const parseGridMode = (value: unknown): GridMode => (value === 'live' ? 'live' : 'historical');
+
+/**
+ * Turn the increases reported by a bulk save into cash-book entries.
+ * Failures are collected rather than thrown: the dues are already saved, and
+ * losing the whole response would leave the admin unsure what landed.
+ */
+async function recordGridLedger(
+  deltas: Array<{ plotId: string; allocations: Array<{ year: number; month: string; amount: number }> }>,
+  adminId: string | undefined,
+): Promise<{ recorded: number; total: number; failed: number }> {
+  let recorded = 0;
+  let total = 0;
+  let failed = 0;
+
+  for (const delta of deltas) {
+    const amount = delta.allocations.reduce((sum, a) => sum + a.amount, 0);
+    if (amount <= 0) continue;
+    try {
+      await recordCollection(
+        {
+          plotId: delta.plotId,
+          amount,
+          allocations: delta.allocations,
+          entryType: 'live',
+          // The grid already wrote the month buckets; only the ledger row is needed.
+          applyToDues: false,
+          generateReceipt: false,
+          note: 'Recorded via payments grid',
+        },
+        adminId,
+      );
+      recorded += 1;
+      total += amount;
+    } catch (err) {
+      failed += 1;
+      console.warn('[payments] grid ledger entry failed:', (err as Error).message);
+    }
+  }
+
+  return { recorded, total, failed };
+}
 
 export const getPaymentByPlotYear = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -82,7 +140,10 @@ export const bulkUpdatePayments = async (req: AuthRequest, res: Response): Promi
     }
 
     const { year, month, entries } = validation.data;
-    const results = await PaymentService.bulkUpdate(entries, year, month);
+    const mode = parseGridMode(req.body?.mode);
+    const { results, deltas } = await PaymentService.bulkUpdate(entries, year, month);
+
+    const ledger = mode === 'live' ? await recordGridLedger(deltas, req.admin?.id) : null;
 
     if (req.admin) {
       await AuditLog.create({
@@ -90,11 +151,17 @@ export const bulkUpdatePayments = async (req: AuthRequest, res: Response): Promi
         action: 'bulk_update',
         entity: 'payment',
         entityId: `${validation.data.block}_${year}_${month}`,
-        changes: { entriesCount: entries.length },
+        changes: { entriesCount: entries.length, mode, ledger },
       });
     }
 
-    sendSuccess(res, results, `${results.length} payments updated`);
+    sendSuccess(
+      res,
+      results,
+      ledger
+        ? `${results.length} payments updated · PKR ${ledger.total} added to this month's income`
+        : `${results.length} payments updated`,
+    );
   } catch (error: any) {
     sendError(res, 'Failed to bulk update payments', 500, error.message);
   }
@@ -114,7 +181,10 @@ export const bulkUpdateAllMonths = async (req: AuthRequest, res: Response): Prom
       return;
     }
 
-    const results = await PaymentService.bulkUpsertMonths(entries, parseInt(year));
+    const mode = parseGridMode(req.body?.mode);
+    const { results, deltas } = await PaymentService.bulkUpsertMonths(entries, parseInt(year));
+
+    const ledger = mode === 'live' ? await recordGridLedger(deltas, req.admin?.id) : null;
 
     if (req.admin) {
       await AuditLog.create({
@@ -122,11 +192,17 @@ export const bulkUpdateAllMonths = async (req: AuthRequest, res: Response): Prom
         action: 'bulk_update',
         entity: 'payment',
         entityId: `${block || 'multi'}_${year}_all`,
-        changes: { entriesCount: entries.length, scope: 'all-months' },
+        changes: { entriesCount: entries.length, scope: 'all-months', mode, ledger },
       });
     }
 
-    sendSuccess(res, results, `${results.length} payments updated`);
+    sendSuccess(
+      res,
+      results,
+      ledger
+        ? `${results.length} payments updated · PKR ${ledger.total} added to this month's income`
+        : `${results.length} payments updated`,
+    );
   } catch (error: any) {
     sendError(res, 'Failed to bulk update payments', 500, error.message);
   }
