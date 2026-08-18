@@ -22,7 +22,11 @@
     "backfill:finance-ledger:prod": "NODE_ENV=production ts-node src/scripts/backfillFinanceLedger.ts",
     "backfill:finance-ledger:prod:dry": "NODE_ENV=production ts-node src/scripts/backfillFinanceLedger.ts --dry",
     "backfill:pdf-thumbnails": "NODE_ENV=development ts-node src/scripts/backfillPdfThumbnails.ts",
-    "backfill:pdf-thumbnails:dry": "NODE_ENV=development ts-node src/scripts/backfillPdfThumbnails.ts --dry"
+    "backfill:pdf-thumbnails:dry": "NODE_ENV=development ts-node src/scripts/backfillPdfThumbnails.ts --dry",
+    "check:ledger": "NODE_ENV=development ts-node src/scripts/checkLedgerConsistency.ts",
+    "check:ledger:fix": "NODE_ENV=development ts-node src/scripts/checkLedgerConsistency.ts --fix",
+    "check:ledger:prod": "NODE_ENV=production ts-node src/scripts/checkLedgerConsistency.ts",
+    "check:ledger:prod:fix": "NODE_ENV=production ts-node src/scripts/checkLedgerConsistency.ts --fix"
   },
   "dependencies": {
     "@fontsource/noto-naskh-arabic": "^5.2.11",

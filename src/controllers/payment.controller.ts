@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { PaymentService } from '../services/payment.service';
+import { PaymentService, LedgerBackedError } from '../services/payment.service';
 import { updatePaymentSchema, bulkPaymentSchema } from '../validations/payment.validation';
 import { sendSuccess, sendError } from '../utils/responseHelper';
 import AuditLog from '../models/AuditLog';
@@ -40,6 +40,18 @@ function describeBlocked(blocked: Array<{ plotId: string; year: number; month: s
 }
 
 const parseGridMode = (value: unknown): GridMode => (value === 'live' ? 'live' : 'historical');
+
+/**
+ * A refusal to unpick a recorded payment is the caller's mistake to correct, not a
+ * server fault — 409 with the reason, so the UI can show it as guidance.
+ */
+function sendLedgerBacked(res: Response, error: unknown): boolean {
+  if (error instanceof LedgerBackedError) {
+    sendError(res, error.message, 409);
+    return true;
+  }
+  return false;
+}
 
 /**
  * Turn the increases reported by a bulk save into cash-book entries.
@@ -145,6 +157,7 @@ export const updatePayment = async (req: AuthRequest, res: Response): Promise<vo
 
     sendSuccess(res, payment, 'Payment updated');
   } catch (error: any) {
+    if (sendLedgerBacked(res, error)) return;
     sendError(res, 'Failed to update payment', 500, error.message);
   }
 };
@@ -250,6 +263,7 @@ export const createOrUpdatePayment = async (req: AuthRequest, res: Response): Pr
 
     sendSuccess(res, payment, 'Payment saved');
   } catch (error: any) {
+    if (sendLedgerBacked(res, error)) return;
     sendError(res, 'Failed to save payment', 500, error.message);
   }
 };
@@ -275,6 +289,7 @@ export const deletePayment = async (req: AuthRequest, res: Response): Promise<vo
 
     sendSuccess(res, null, 'Payment record deleted');
   } catch (error: any) {
+    if (sendLedgerBacked(res, error)) return;
     sendError(res, 'Failed to delete payment', 500, error.message);
   }
 };
@@ -313,6 +328,7 @@ export const voidPaymentMonth = async (req: AuthRequest, res: Response): Promise
 
     sendSuccess(res, result.payment, `${month} voided (PKR ${result.voidedAmount})`);
   } catch (error: any) {
+    if (sendLedgerBacked(res, error)) return;
     sendError(res, 'Failed to void payment', 500, error.message);
   }
 };

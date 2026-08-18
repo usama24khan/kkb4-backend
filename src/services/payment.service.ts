@@ -58,6 +58,39 @@ async function loadLedgerBackedMonths(plotIds: string[]): Promise<Set<string>> {
   return backed;
 }
 
+/**
+ * Which of a year's months are backed by a recorded payment.
+ *
+ * Any route that lowers or removes a month has to consult this. Taking money off
+ * a month the cash book has banked leaves the income counted, the owner's record
+ * empty and a receipt in their hand — three things that no longer agree, with
+ * nothing to show it happened. Voiding the payment in Accounts is the one action
+ * that unwinds all three together, so these paths refuse and say so.
+ */
+async function ledgerBackedMonthsFor(plotId: string, year: number): Promise<Set<string>> {
+  const backed = new Set<string>();
+  const live = await Collection.find({ plot: plotId, isVoided: false, countInCashBook: true })
+    .select('allocations')
+    .lean();
+  for (const entry of live as any[]) {
+    for (const alloc of entry.allocations || []) {
+      if (Number(alloc.year) === Number(year)) backed.add(String(alloc.month).toLowerCase());
+    }
+  }
+  return backed;
+}
+
+/** Raised when a caller tries to undo a month the cash book has banked. */
+export class LedgerBackedError extends Error {
+  constructor(public readonly months: string[], public readonly year: number) {
+    super(
+      `${months.join(', ')} ${year} ${months.length === 1 ? 'is' : 'are'} covered by a recorded payment. ` +
+        `Void that payment in Accounts to reverse the dues, the income and the receipt together.`,
+    );
+    this.name = 'LedgerBackedError';
+  }
+}
+
 export class PaymentService {
   static async getByPlotAndYear(plotId: string, year: number) {
     return Payment.findOne({ plot: plotId, year }).populate('plot').lean();
@@ -72,11 +105,20 @@ export class PaymentService {
     if (!payment) return null;
 
     if (data.payments) {
+      const backed = await ledgerBackedMonthsFor(payment.plot.toString(), payment.year);
+      const refused: string[] = [];
       for (const month of MONTHS) {
-        if ((data.payments as any)[month] !== undefined) {
-          (payment.payments as any)[month] = (data.payments as any)[month];
+        const incoming = (data.payments as any)[month];
+        if (incoming === undefined) continue;
+        const before = Number((payment.payments as any)[month]) || 0;
+        const after = Number(incoming) || 0;
+        if (after < before && backed.has(month)) {
+          refused.push(month);
+          continue;
         }
+        (payment.payments as any)[month] = incoming;
       }
+      if (refused.length) throw new LedgerBackedError(refused, payment.year);
     }
     if (data.mcRate !== undefined) payment.mcRate = data.mcRate;
     if (data.note !== undefined) payment.note = data.note;
@@ -97,6 +139,14 @@ export class PaymentService {
   }
 
   static async deletePayment(paymentId: string) {
+    const payment = await Payment.findById(paymentId).select('plot year payments').lean();
+    if (!payment) return null;
+
+    // Deleting the year would take every month with it, recorded payments included.
+    const backed = await ledgerBackedMonthsFor((payment as any).plot.toString(), (payment as any).year);
+    const withMoney = MONTHS.filter((m) => backed.has(m));
+    if (withMoney.length) throw new LedgerBackedError(withMoney, (payment as any).year);
+
     return Payment.findByIdAndDelete(paymentId);
   }
 
@@ -122,6 +172,10 @@ export class PaymentService {
       // Nothing to void.
       return null;
     }
+
+    // Voiding here only clears the dues; the income and the receipt would remain.
+    const backed = await ledgerBackedMonthsFor(payment.plot.toString(), payment.year);
+    if (backed.has(month)) throw new LedgerBackedError([month], payment.year);
 
     payment.voidedEntries.push({
       month,
@@ -187,11 +241,20 @@ export class PaymentService {
 
     if (existing) {
       if (data.payments) {
+        const backed = await ledgerBackedMonthsFor(plotId, year);
+        const refused: string[] = [];
         for (const month of MONTHS) {
-          if ((data.payments as any)[month] !== undefined) {
-            (existing.payments as any)[month] = (data.payments as any)[month];
+          const incoming = (data.payments as any)[month];
+          if (incoming === undefined) continue;
+          const before = Number((existing.payments as any)[month]) || 0;
+          const after = Number(incoming) || 0;
+          if (after < before && backed.has(month)) {
+            refused.push(month);
+            continue;
           }
+          (existing.payments as any)[month] = incoming;
         }
+        if (refused.length) throw new LedgerBackedError(refused, year);
       }
       if (data.mcRate !== undefined) existing.mcRate = data.mcRate;
       if (data.note !== undefined) existing.note = data.note;
