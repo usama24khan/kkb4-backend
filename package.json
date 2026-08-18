@@ -26,7 +26,11 @@
     "check:ledger": "NODE_ENV=development ts-node src/scripts/checkLedgerConsistency.ts",
     "check:ledger:fix": "NODE_ENV=development ts-node src/scripts/checkLedgerConsistency.ts --fix",
     "check:ledger:prod": "NODE_ENV=production ts-node src/scripts/checkLedgerConsistency.ts",
-    "check:ledger:prod:fix": "NODE_ENV=production ts-node src/scripts/checkLedgerConsistency.ts --fix"
+    "check:ledger:prod:fix": "NODE_ENV=production ts-node src/scripts/checkLedgerConsistency.ts --fix",
+    "migrate:rates": "NODE_ENV=development ts-node src/scripts/migrateRateSchedule.ts",
+    "migrate:rates:dry": "NODE_ENV=development ts-node src/scripts/migrateRateSchedule.ts --dry",
+    "migrate:rates:prod": "NODE_ENV=production ts-node src/scripts/migrateRateSchedule.ts",
+    "migrate:rates:prod:dry": "NODE_ENV=production ts-node src/scripts/migrateRateSchedule.ts --dry"
   },
   "dependencies": {
     "@fontsource/noto-naskh-arabic": "^5.2.11",

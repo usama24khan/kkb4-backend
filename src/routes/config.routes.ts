@@ -3,7 +3,7 @@ import { YEARS_WITH_DATA, getMcRateForYear } from '../config/constants';
 import { sendSuccess, sendError } from '../utils/responseHelper';
 import { getStructure } from '../utils/blockRegistry';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { getRatesFromDB } from '../controllers/seed.controller';
+import { getRatesFromDB, getRatePeriodsFromDB } from '../controllers/seed.controller';
 import MonthlyRate from '../models/MonthlyRate';
 import { env } from '../config/env';
 
@@ -24,11 +24,14 @@ router.get('/app-mode', (_req, res) => {
  */
 router.get('/rates', async (_req, res) => {
   try {
+    // `rates` stays one row per year (its December figure) for existing callers;
+    // `periods` carries the real schedule, including the mid-2022 change.
     const rateMap = await getRatesFromDB();
     const rates = Object.entries(rateMap)
       .map(([year, rate]) => ({ year: Number(year), rate }))
       .sort((a, b) => a.year - b.year);
-    sendSuccess(res, { rates }, 'Rate schedule fetched');
+    const periods = await getRatePeriodsFromDB();
+    sendSuccess(res, { rates, periods }, 'Rate schedule fetched');
   } catch (error: any) {
     sendError(res, 'Failed to fetch rates', 500, error.message);
   }
@@ -41,6 +44,9 @@ router.put('/rates/:year', authMiddleware, async (req: Request, res: Response) =
   try {
     const year = parseInt(req.params.year, 10);
     const { rate } = req.body;
+    // Optional, so an existing caller sending only { rate } still sets the whole
+    // year; sending fromMonth lets a rate start part-way through, as May 2022 did.
+    const fromMonth = req.body?.fromMonth === undefined ? 1 : parseInt(req.body.fromMonth, 10);
 
     if (isNaN(year) || year < 2000 || year > 2100) {
       sendError(res, 'Invalid year', 400);
@@ -50,13 +56,21 @@ router.put('/rates/:year', authMiddleware, async (req: Request, res: Response) =
       sendError(res, 'rate must be a non-negative number', 400);
       return;
     }
+    if (isNaN(fromMonth) || fromMonth < 1 || fromMonth > 12) {
+      sendError(res, 'fromMonth must be between 1 and 12', 400);
+      return;
+    }
 
     const doc = await MonthlyRate.findOneAndUpdate(
-      { year },
+      { year, fromMonth },
       { rate },
       { upsert: true, new: true }
     );
-    sendSuccess(res, { year: doc.year, rate: doc.rate }, 'Rate updated');
+    sendSuccess(
+      res,
+      { year: doc.year, fromMonth: doc.fromMonth, rate: doc.rate },
+      'Rate updated',
+    );
   } catch (error: any) {
     sendError(res, 'Failed to update rate', 500, error.message);
   }

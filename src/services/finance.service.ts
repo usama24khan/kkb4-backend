@@ -33,7 +33,7 @@ import Payment from '../models/Payment';
 import Plot from '../models/Plot';
 import Receipt from '../models/Receipt';
 import MonthlyRate from '../models/MonthlyRate';
-import { MONTHS, YEARS_WITH_DATA, getMcRateForYear } from '../config/constants';
+import { MONTHS, YEARS_WITH_DATA, getMcRateForMonth } from '../config/constants';
 import {
   currentBookPeriod,
   monthKey,
@@ -107,18 +107,52 @@ export interface PeriodTotals {
 // ── Rates ────────────────────────────────────────────────────────────────────
 
 /**
- * Monthly charge per year, DB overrides first and the constant schedule as the
- * fallback for any year the admin never configured.
+ * Resolves the monthly charge for any given month.
+ *
+ * The charge rose to PKR 400 in May 2022, part-way through the year, so this is
+ * answered per month and never per year — pricing January to April 2022 at 400
+ * would overcharge, and pricing May onwards at 200 undercharges every receipt
+ * issued since.
+ *
+ * Admin overrides in the database take precedence over the built-in schedule.
+ * Each override applies from its own (year, fromMonth) until the next one, so a
+ * mid-year change can be expressed by adding a second entry for that year.
  */
-export async function getRateMap(): Promise<Record<number, number>> {
-  const docs = await MonthlyRate.find().lean();
-  const map: Record<number, number> = {};
-  for (const doc of docs) map[doc.year] = doc.rate;
-  return map;
+export type RateResolver = (year: number, month: number) => number;
+
+export async function getRateResolver(): Promise<RateResolver> {
+  const docs = await MonthlyRate.find().select('year fromMonth rate').lean();
+  const overrides = docs
+    .map((d: any) => ({
+      ordinal: periodOrdinal(d.year, Number(d.fromMonth) || 1),
+      rate: Number(d.rate),
+    }))
+    .sort((a, b) => a.ordinal - b.ordinal);
+
+  return (year: number, month: number): number => {
+    const ordinal = periodOrdinal(year, month);
+    // The latest override that has taken effect by this month, if any.
+    let resolved: number | null = null;
+    for (const o of overrides) {
+      if (o.ordinal <= ordinal) resolved = o.rate;
+      else break;
+    }
+    return resolved ?? getMcRateForMonth(year, month);
+  };
 }
 
-function rateForYear(map: Record<number, number>, year: number): number {
-  return map[year] ?? getMcRateForYear(year);
+/**
+ * Monthly charge per year — the year's prevailing (December) figure.
+ *
+ * Only for callers that can hold one number per year, such as the `mcRate`
+ * stored on a payment record. Anything computing what is owed wants
+ * `getRateResolver`.
+ */
+export async function getRateMap(): Promise<Record<number, number>> {
+  const resolve = await getRateResolver();
+  const map: Record<number, number> = {};
+  for (const year of YEARS_WITH_DATA) map[year] = resolve(year, 12);
+  return map;
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
@@ -161,7 +195,7 @@ export async function getDuesLadder(
   plotId: string,
   opts: { fromYear?: number; throughOrdinal?: number; advanceMonths?: number } = {}
 ): Promise<{ arrears: MonthDue[]; future: MonthDue[] }> {
-  const rateMap = await getRateMap();
+  const resolveRate = await getRateResolver();
   const payments = await Payment.find({ plot: plotId }).lean();
   const byYear = new Map<number, any>();
   for (const p of payments) byYear.set(p.year, p);
@@ -190,7 +224,9 @@ export async function getDuesLadder(
     if (year < DUES_START_YEAR) continue;
 
     const record = byYear.get(year);
-    const rate = record?.mcRate || rateForYear(rateMap, year);
+    // The schedule decides, not the record's own `mcRate`: that field holds one
+    // number for a whole year and cannot describe a month the charge changed in.
+    const rate = resolveRate(year, month);
     const paid = Number(record?.payments?.[monthKey(month)]) || 0;
     const owed = Math.max(0, rate - paid);
     const entry: MonthDue = { year, month: monthKey(month), rate, paid, owed };
@@ -269,9 +305,9 @@ export async function getMonthStatus(
   year: number,
   month: number,
 ): Promise<{ year: number; month: string; paid: number; rate: number; owed: number }> {
-  const rateMap = await getRateMap();
+  const resolveRate = await getRateResolver();
   const record: any = await Payment.findOne({ plot: plotId, year }).lean();
-  const rate = record?.mcRate || rateForYear(rateMap, year);
+  const rate = resolveRate(year, month);
   const paid = Number(record?.payments?.[monthKey(month)]) || 0;
   return { year, month: monthKey(month), paid, rate, owed: Math.max(0, rate - paid) };
 }
@@ -303,7 +339,7 @@ export async function findAllocationConflicts(
 ): Promise<AllocationConflict[]> {
   if (!allocations.length) return [];
 
-  const rateMap = await getRateMap();
+  const resolveRate = await getRateResolver();
   const years = [...new Set(allocations.map((a) => a.year))];
   const payments = await Payment.find({ plot: plotId, year: { $in: years } }).lean();
   const byYear = new Map(payments.map((p) => [p.year, p]));
@@ -317,7 +353,7 @@ export async function findAllocationConflicts(
       year: alloc.year,
       month: String(alloc.month).toLowerCase(),
       alreadyPaid,
-      rate: record?.mcRate || rateForYear(rateMap, alloc.year),
+      rate: resolveRate(alloc.year, monthNumber(String(alloc.month))),
       wouldBecome: alreadyPaid + alloc.amount,
     });
   }
@@ -349,7 +385,7 @@ async function applyAllocations(
 ): Promise<void> {
   if (!allocations.length) return;
 
-  const rateMap = await getRateMap();
+  const resolveRate = await getRateResolver();
   const byYear = new Map<number, IAllocation[]>();
   for (const alloc of allocations) {
     const list = byYear.get(alloc.year) || [];
@@ -365,7 +401,7 @@ async function applyAllocations(
       payment = new Payment({
         plot: plotId,
         year,
-        mcRate: rateForYear(rateMap, year),
+        mcRate: resolveRate(year, 12),
         payments: {},
       });
     }

@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document, Types } from 'mongoose';
+import { getChargeForYear } from '../config/constants';
 
 export interface IPaymentMonths {
   jan: number | null;
@@ -105,7 +106,9 @@ PaymentSchema.pre('save', function (next) {
   }
   
   this.totalReceived = total;
-  this.totalDue = this.mcRate * 12;
+  // Charged month by month: the rate changed in May 2022, so multiplying one
+  // figure by twelve is wrong for that year and for any stored rate gone stale.
+  this.totalDue = getChargeForYear(this.year);
   this.remaining = this.totalDue - this.totalReceived;
   
   next();

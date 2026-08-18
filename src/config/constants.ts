@@ -80,15 +80,63 @@ export const YEARS_WITH_DATA = [
   2024, 2025, 2026,
 ];
 
-export const DEFAULT_MC_RATE = 200; // PKR per month (years ≤ 2021)
-export const NEWER_MC_RATE = 400;   // PKR per month (years ≥ 2022)
+export const DEFAULT_MC_RATE = 200; // PKR per month (up to April 2022)
+export const NEWER_MC_RATE = 400;   // PKR per month (from May 2022 onwards)
 
 /**
- * Rate rule: monthly charge is PKR 200 for years 2012–2021,
- *            PKR 400 from 2022 onwards.
+ * When the monthly charge changed, and to what.
+ *
+ * The rise to PKR 400 took effect in **May 2022**, part-way through the year, so
+ * a rate cannot be answered by year alone: January to April 2022 are still 200.
+ * Entries are effective-from and must stay sorted oldest first.
+ */
+export const RATE_CHANGES: Array<{ year: number; month: number; rate: number }> = [
+  { year: 2012, month: 1, rate: DEFAULT_MC_RATE },
+  { year: 2022, month: 5, rate: NEWER_MC_RATE },
+];
+
+/**
+ * The monthly charge for one specific month — the only rate function that is
+ * correct for every month, and what all dues and receipt maths should use.
+ */
+export function getMcRateForMonth(year: number, month: number): number {
+  let rate = RATE_CHANGES[0].rate;
+  for (const change of RATE_CHANGES) {
+    if (year > change.year || (year === change.year && month >= change.month)) rate = change.rate;
+    else break;
+  }
+  return rate;
+}
+
+/**
+ * A year's prevailing charge — its December rate.
+ *
+ * Kept for the places that can only show one number per year (the dues letter's
+ * rate column, a plot's "rate" line). In a year the rate changed this is the
+ * later figure, so use `getMcRateForMonth` wherever a month is known.
  */
 export function getMcRateForYear(year: number): number {
-  return year >= 2022 ? NEWER_MC_RATE : DEFAULT_MC_RATE;
+  return getMcRateForMonth(year, 12);
+}
+
+/**
+ * Total charge for a run of months in one year, inclusive.
+ *
+ * Months are added at their own rate rather than multiplied by a single figure,
+ * which is what makes 2022 come out right: 200 for January to April and 400 from
+ * May, so the year totals 4,000 and not 2,400 or 4,800.
+ */
+export function getChargeForMonths(year: number, fromMonth = 1, toMonth = 12): number {
+  let total = 0;
+  for (let m = Math.max(1, fromMonth); m <= Math.min(12, toMonth); m++) {
+    total += getMcRateForMonth(year, m);
+  }
+  return total;
+}
+
+/** What a full year of maintenance costs. */
+export function getChargeForYear(year: number): number {
+  return getChargeForMonths(year, 1, 12);
 }
 
 export const MC_RATE_BY_YEAR: Record<number, number> = {};
@@ -100,8 +148,8 @@ for (const y of YEARS_WITH_DATA) {
  * Rate schedule for the GET /config/rates endpoint.
  */
 export const RATE_SCHEDULE = [
-  { from_year: 2012, to_year: 2021, monthly_rate: 200 },
-  { from_year: 2022, to_year: null, monthly_rate: 400 },
+  { from_year: 2012, from_month: 1, to_year: 2022, to_month: 4, monthly_rate: DEFAULT_MC_RATE },
+  { from_year: 2022, from_month: 5, to_year: null, to_month: null, monthly_rate: NEWER_MC_RATE },
 ];
 
 // ── Allotment Status ─────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 import MonthlyRate from '../models/MonthlyRate';
 import Plot from '../models/Plot';
 import Payment from '../models/Payment';
-import { YEARS_WITH_DATA, getMcRateForYear, MONTHS } from '../config/constants';
+import { YEARS_WITH_DATA, getMcRateForYear, getMcRateForMonth, RATE_CHANGES, MONTHS } from '../config/constants';
 import { env } from '../config/env';
 
 /**
@@ -12,10 +12,17 @@ export const ensureDefaultRates = async (): Promise<void> => {
   try {
     const count = await MonthlyRate.countDocuments();
     if (count === 0) {
-      const docs = YEARS_WITH_DATA.map((year) => ({
-        year,
-        rate: getMcRateForYear(year),
-      }));
+      // One document per year, plus an extra at each mid-year change so the
+      // month the rate moved is recorded rather than lost to the year average.
+      const docs: Array<{ year: number; fromMonth: number; rate: number }> = [];
+      for (const year of YEARS_WITH_DATA) {
+        docs.push({ year, fromMonth: 1, rate: getMcRateForMonth(year, 1) });
+        for (const change of RATE_CHANGES) {
+          if (change.year === year && change.month > 1) {
+            docs.push({ year, fromMonth: change.month, rate: change.rate });
+          }
+        }
+      }
       await MonthlyRate.insertMany(docs);
       console.log(`✅ Seeded ${docs.length} monthly rate records`);
     }
@@ -25,16 +32,43 @@ export const ensureDefaultRates = async (): Promise<void> => {
 };
 
 /**
- * Fetch all rates from DB as a map { year → rate }.
- * Falls back to constants if DB is unavailable.
+ * Every rate period on record, oldest first, gaps filled from the constants.
+ *
+ * A period rather than a year: the charge rose in May 2022, so 2022 has two
+ * entries and any consumer showing one rate per year would misprice four months
+ * of it.
+ */
+export const getRatePeriodsFromDB = async (): Promise<
+  Array<{ year: number; fromMonth: number; rate: number }>
+> => {
+  const docs = await MonthlyRate.find().select('year fromMonth rate').lean();
+  const periods = docs.map((d: any) => ({
+    year: d.year,
+    fromMonth: Number(d.fromMonth) || 1,
+    rate: d.rate,
+  }));
+  const seen = new Set(periods.map((p) => `${p.year}-${p.fromMonth}`));
+
+  for (const year of YEARS_WITH_DATA) {
+    if (!seen.has(`${year}-1`)) periods.push({ year, fromMonth: 1, rate: getMcRateForMonth(year, 1) });
+    for (const change of RATE_CHANGES) {
+      if (change.year === year && change.month > 1 && !seen.has(`${year}-${change.month}`)) {
+        periods.push({ year, fromMonth: change.month, rate: change.rate });
+      }
+    }
+  }
+
+  return periods.sort((a, b) => a.year - b.year || a.fromMonth - b.fromMonth);
+};
+
+/**
+ * Rates as a map { year → prevailing (December) rate }.
+ * Kept for callers that can only hold one figure per year.
  */
 export const getRatesFromDB = async (): Promise<Record<number, number>> => {
-  const docs = await MonthlyRate.find().lean();
+  const periods = await getRatePeriodsFromDB();
   const map: Record<number, number> = {};
-  for (const doc of docs) {
-    map[doc.year] = doc.rate;
-  }
-  // fill any gaps with constant fallback
+  for (const p of periods) map[p.year] = p.rate; // sorted, so the last wins
   for (const year of YEARS_WITH_DATA) {
     if (map[year] === undefined) map[year] = getMcRateForYear(year);
   }

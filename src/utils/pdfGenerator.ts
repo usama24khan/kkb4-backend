@@ -26,6 +26,7 @@ import {
   MONTHS,
   MONTH_NAMES,
   getMcRateForYear,
+  getMcRateForMonth,
   BLOCK_PHASE_MAP,
 } from "../config/constants";
 import { IPlot } from "../models/Plot";
@@ -147,17 +148,23 @@ export function computeBreakdown(
 
   for (let y = yearFrom; y <= yearTo; y++) {
     const payment = byYear.get(y);
-    const mcRate = payment?.mcRate ?? getMcRateForYear(y);
     const unpaidMonths: string[] = [];
     let amountDue = 0;
 
-    for (const m of MONTHS) {
+    // Each month is charged at its own rate. The charge rose mid-2022, so a
+    // year-wide figure would understate the arrears of every month since May
+    // 2022 and overstate January to April of that year.
+    for (let i = 0; i < MONTHS.length; i++) {
+      const m = MONTHS[i];
+      const monthRate = getMcRateForMonth(y, i + 1);
       const paid = payment ? Number((payment.payments as any)[m] || 0) : 0;
-      if (paid < mcRate) {
+      if (paid < monthRate) {
         unpaidMonths.push(m);
-        amountDue += mcRate - paid;
+        amountDue += monthRate - paid;
       }
     }
+    // The rate column can only show one number per year; use the prevailing one.
+    const mcRate = getMcRateForYear(y);
 
     if (amountDue > 0) {
       breakdowns.push({ year: y, mcRate, unpaidMonths, amountDue });

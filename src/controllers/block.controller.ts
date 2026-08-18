@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { PlotService } from '../services/plot.service';
 import { StatsService } from '../services/stats.service';
-import { ALL_BLOCKS, BLOCK_PHASE_MAP, getMcRateForYear } from '../config/constants';
+import { ALL_BLOCKS, BLOCK_PHASE_MAP, getMcRateForYear, getChargeForMonths } from '../config/constants';
 import { sendSuccess, sendError } from '../utils/responseHelper';
 import Payment from '../models/Payment';
 import Block from '../models/Block';
@@ -52,7 +52,8 @@ export const getBlockDetail = async (req: Request, res: Response): Promise<void>
           if (val !== null && val !== undefined && !isNaN(val)) paidInWindow += val;
         }
       }
-      const due = mcRate * monthsElapsed;
+      // Per-month charge, so 2022's mid-year rise is not flattened.
+      const due = getChargeForMonths(year, 1, monthsElapsed);
       return {
         ...p,
         plotCode: `${p.plotNumber}-${p.block}`,

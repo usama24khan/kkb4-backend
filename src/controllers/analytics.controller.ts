@@ -3,7 +3,7 @@ import Plot from '../models/Plot';
 import Payment from '../models/Payment';
 import Year from '../models/Year';
 import { sendSuccess, sendError } from '../utils/responseHelper';
-import { BLOCK_PHASE_MAP, ALL_BLOCKS, MC_RATE_BY_YEAR, DEFAULT_MC_RATE, MONTHS, PHASE_BLOCK_MAP, ALL_PHASES, getMcRateForYear } from '../config/constants';
+import { BLOCK_PHASE_MAP, ALL_BLOCKS, MC_RATE_BY_YEAR, DEFAULT_MC_RATE, MONTHS, PHASE_BLOCK_MAP, ALL_PHASES, getMcRateForYear, getMcRateForMonth, MONTH_INDEX } from '../config/constants';
 
 const MONTH_ORDER = MONTHS;
 
@@ -71,10 +71,11 @@ export const getAnalyticsOverview = async (req: Request, res: Response): Promise
         }
       } else {
         const payDoc = plotPayments.find((p: any) => p.year === year);
-        const mcRate = payDoc ? payDoc.mcRate : getMcRateForYear(year);
-        
+
         monthsInRange.forEach(m => {
-          plotDue += mcRate;
+          // Each month at its own rate — the schedule decides, not the record's
+          // stored yearly figure, which cannot describe a mid-year change.
+          plotDue += getMcRateForMonth(year, MONTH_INDEX[m]);
           if (payDoc && payDoc.payments) {
             const val = (payDoc.payments as any)[m];
             if (val !== null && val !== undefined && !isNaN(val)) {
@@ -86,7 +87,7 @@ export const getAnalyticsOverview = async (req: Request, res: Response): Promise
 
       return {
         plot,
-        mcRate: isOverall ? 0 : (plotPayments.find((p: any) => p.year === year)?.mcRate || getMcRateForYear(year)),
+        mcRate: isOverall ? 0 : getMcRateForYear(year),
         due: plotDue,
         received: plotReceived,
         remaining: plotDue - plotReceived,

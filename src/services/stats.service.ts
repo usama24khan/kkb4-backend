@@ -1,6 +1,6 @@
 import Payment from '../models/Payment';
 import Plot from '../models/Plot';
-import { PHASE_BLOCK_MAP, BLOCK_PHASE_MAP, MONTHS, ALL_BLOCKS, ALL_PHASES, getMcRateForYear } from '../config/constants';
+import { PHASE_BLOCK_MAP, BLOCK_PHASE_MAP, MONTHS, ALL_BLOCKS, ALL_PHASES, getMcRateForYear, getChargeForMonths } from '../config/constants';
 
 export class StatsService {
   /**
@@ -26,9 +26,15 @@ export class StatsService {
     }
     const monthsInRange = MONTHS.slice(startIdx === -1 ? 0 : startIdx, endIdx + 1);
 
-    // totalDue = ALL active plots × rate × months elapsed (not just plots with records)
+    // totalDue = ALL active plots × the charge for the elapsed months (not just
+    // plots with records). Summed per month because the rate changed mid-2022.
     const mcRate = getMcRateForYear(isOverall ? currentYear : year);
-    const totalDue = isOverall ? 0 : totalPlots * mcRate * monthsInRange.length;
+    const windowCharge = getChargeForMonths(
+      isOverall ? currentYear : year,
+      (startIdx === -1 ? 0 : startIdx) + 1,
+      endIdx + 1,
+    );
+    const totalDue = isOverall ? 0 : totalPlots * windowCharge;
 
     let totalCollected = 0;
     let paidPlots = 0;
@@ -95,8 +101,14 @@ export class StatsService {
 
     const mcRate = getMcRateForYear(isOverall ? currentYear : year);
 
-    // totalDue = ALL active plots × rate × months elapsed (not just plots with records)
-    const totalDue = isOverall ? 0 : plots.length * mcRate * monthsInRange.length;
+    // totalDue = ALL active plots × the charge for the elapsed months, summed per
+    // month so the mid-2022 rate change is priced correctly.
+    const windowCharge = getChargeForMonths(
+      isOverall ? currentYear : year,
+      (startIdx === -1 ? 0 : startIdx) + 1,
+      endIdx + 1,
+    );
+    const totalDue = isOverall ? 0 : plots.length * windowCharge;
 
     let totalCollected = 0;
     let paidCount = 0;
