@@ -15,16 +15,25 @@
 import mongoose from "mongoose";
 import path from "path";
 import { connectDB } from "../config/db";
-import { parseExcelFile } from "../utils/excelParser";
+import { parseWorkbook, buildBlockMap } from "../utils/excelParser";
 import Plot from "../models/Plot";
 import Payment from "../models/Payment";
+import Collection from "../models/Collection";
 import { BLOCK_PHASE_MAP, MONTHS } from "../config/constants";
 
 // ── CLI args ──────────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
-const filePath = args.find((a) => !a.startsWith("--"));
+const positional = args.filter((a, i) => !a.startsWith("--") && args[i - 1] !== "--block-map");
+const filePath = positional[0];
 const isDryRun = args.includes("--dry-run");
+/**
+ * A workbook that states the block on every row, used as the authority for which
+ * block a plot belongs to. Without it the block is read down the column, which
+ * misfiles any section that opens on a bare plot number.
+ */
+const blockMapFlag = args.findIndex((a) => a === "--block-map");
+const blockMapFile = blockMapFlag >= 0 ? args[blockMapFlag + 1] : undefined;
 const shouldClear = args.includes("--clear");
 
 if (!filePath) {
@@ -49,8 +58,16 @@ async function seed() {
 
   // ── Step 1: Parse Excel ───────────────────────────────────────────────────
   let parsedData;
+  let parseIssues: { sheet: string; row: number | null; message: string; amount?: number; kind: string }[] = [];
   try {
-    parsedData = parseExcelFile(absPath);
+    let blockMap;
+    if (blockMapFile) {
+      blockMap = buildBlockMap(path.resolve(blockMapFile));
+      console.log(`   Plot register: ${blockMapFile} — ${blockMap.size} plot numbers with a stated block`);
+    }
+    const result = parseWorkbook(absPath, { blockMap });
+    parsedData = result.records;
+    parseIssues = result.issues;
   } catch (err: any) {
     console.error(`❌ Failed to parse Excel file: ${err.message}`);
     process.exit(1);
@@ -64,6 +81,18 @@ async function seed() {
   }
 
   console.log(`\n📊 Total parsed records: ${parsedData.length}`);
+
+  // Anything the workbook could not give us, stated before we write a thing.
+  const rowIssues = parseIssues.filter((i) => i.kind === "unimportable-row");
+  if (parseIssues.length > 0) {
+    const lost = rowIssues.reduce((sum, i) => sum + (i.amount || 0), 0);
+    console.log(`\n⚠️  ${parseIssues.length} workbook issue(s)` + (lost > 0 ? `, ₨${lost.toLocaleString()} not imported:` : ":"));
+    for (const issue of parseIssues.slice(0, 25)) {
+      console.log(`   ${issue.sheet}${issue.row ? ` row ${issue.row}` : ""}: ${issue.message}`);
+    }
+    if (parseIssues.length > 25) console.log(`   …and ${parseIssues.length - 25} more`);
+    console.log(`   Run "npm run check:excel" for the full list.`);
+  }
 
   // ── Dry run — stop here ───────────────────────────────────────────────────
   if (isDryRun) {
@@ -102,96 +131,178 @@ async function seed() {
     console.log("   ✅ Collections cleared\n");
   }
 
-  // ── Step 4: Upsert records ────────────────────────────────────────────────
+  // ── Step 3b: Months already backed by a recorded payment ──────────────────
+  //
+  // The importer replaces a year's month values wholesale. That is fine for the
+  // one-time historical load, but this script will be run again — and by then some
+  // months will have been paid at the counter, each with a receipt and a cash-book
+  // entry behind it. Overwriting those from the spreadsheet would leave the ledger
+  // holding money that the owner's record no longer shows, with a receipt in
+  // somebody's hand. So they are protected: the spreadsheet cannot touch them.
+  const protectedMonths = new Set<string>();
+  {
+    const live = await Collection.find({ isVoided: false, countInCashBook: true })
+      .select("plot allocations")
+      .lean();
+    for (const entry of live as any[]) {
+      for (const alloc of entry.allocations || []) {
+        protectedMonths.add(`${entry.plot}:${alloc.year}:${String(alloc.month).toLowerCase()}`);
+      }
+    }
+    if (protectedMonths.size > 0) {
+      console.log(
+        `\n🔒 ${protectedMonths.size} month(s) are backed by recorded payments and will not be overwritten.`,
+      );
+    }
+  }
+
+  // ── Step 4: Write in batches ──────────────────────────────────────────────
+  //
+  // Row-by-row writes meant four round trips per record: ~16,000 of them for this
+  // workbook, which took over half an hour against Atlas and left the database
+  // half-loaded if it was interrupted. Everything below is grouped into a handful
+  // of bulk operations instead, so the import is quick and each collection lands
+  // in one go.
   let plotsCreated = 0;
   let plotsUpdated = 0;
   let paymentsUpserted = 0;
+  let monthsProtected = 0;
   let errors = 0;
+  const protectedLog: string[] = [];
   const errorLog: string[] = [];
 
+  const plotKey = (plotNumber: string, block: string) => `${plotNumber}-${block.toUpperCase()}`;
+
+  // ── 4a. One record per plot, taking its details from the latest year present ──
+  const plotByKey = new Map<string, (typeof parsedData)[number]>();
   for (const entry of parsedData) {
-    try {
-      // ── Validate required fields ──────────────────────────────────────────
-      if (!entry.plotNumber || !entry.block) {
-        errorLog.push(
-          `Skipped (missing plotNumber or block): year=${entry.year} srNo=${entry.srNo}`,
-        );
-        errors++;
-        continue;
-      }
+    if (!entry.plotNumber || !entry.block) {
+      errorLog.push(`Skipped (missing plotNumber or block): year=${entry.year} srNo=${entry.srNo}`);
+      errors++;
+      continue;
+    }
+    const key = plotKey(entry.plotNumber, entry.block);
+    const seen = plotByKey.get(key);
+    if (!seen || entry.year > seen.year) plotByKey.set(key, entry);
+  }
 
-      // ── Upsert Plot ───────────────────────────────────────────────────────
-      const phase = BLOCK_PHASE_MAP[entry.block.toUpperCase()] || "";
-      const plotCode = `${entry.plotNumber}-${entry.block}`;
-      const plotBlock = `${entry.plotNumber} ${entry.block}`;
+  // `any` because allotmentStatus arrives from the sheet as a plain string, and
+  // the model's union type cannot be proven at this boundary.
+  const plotOps: any[] = [...plotByKey.values()].map((entry) => {
+    const block = entry.block.toUpperCase();
+    return {
+      updateOne: {
+        filter: { plotNumber: entry.plotNumber, block },
+        update: {
+          $set: {
+            srNo: entry.srNo,
+            ownerName: entry.ownerName,
+            plotNumber: entry.plotNumber,
+            block,
+            phase: BLOCK_PHASE_MAP[block] || "",
+            plotBlock: `${entry.plotNumber} ${block}`,
+            plotCode: `${entry.plotNumber}-${block}`,
+            allotmentStatus: entry.allotmentStatus,
+            isActive: entry.allotmentStatus !== "Cancelled",
+          },
+        },
+        upsert: true,
+      },
+    };
+  });
 
-      const plotData = {
-        srNo: entry.srNo,
-        ownerName: entry.ownerName,
-        plotNumber: entry.plotNumber,
-        block: entry.block.toUpperCase(),
-        phase,
-        plotBlock,
-        plotCode,
-        allotmentStatus: entry.allotmentStatus as
-          | "Active"
-          | "Cancelled"
-          | "Unsold"
-          | "Unknown",
-        isActive: entry.allotmentStatus !== "Cancelled",
-      };
+  if (plotOps.length) {
+    const res = await Plot.bulkWrite(plotOps, { ordered: false });
+    plotsCreated = res.upsertedCount || 0;
+    plotsUpdated = res.modifiedCount || 0;
+    console.log(`   ✅ Plots: ${plotsCreated} created, ${plotsUpdated} updated`);
+  }
 
-      let plotId: mongoose.Types.ObjectId;
+  // ── 4b. Resolve every plot id in one read ──────────────────────────────────
+  const plots = await Plot.find({}).select("plotNumber block").lean();
+  const idByKey = new Map<string, mongoose.Types.ObjectId>();
+  for (const p of plots as any[]) {
+    idByKey.set(plotKey(p.plotNumber, p.block), p._id);
+  }
 
-      const existingPlot = await Plot.findOne({
-        plotNumber: entry.plotNumber,
-        block: entry.block.toUpperCase(),
-      }).lean();
+  // ── 4c. Existing payment records, to merge protected months into ───────────
+  const existingByKey = new Map<string, any>();
+  {
+    const years = [...new Set(parsedData.map((e) => e.year))];
+    const existing = await Payment.find({ year: { $in: years } }).select("plot year payments").lean();
+    for (const doc of existing as any[]) {
+      existingByKey.set(`${doc.plot}:${doc.year}`, doc.payments || {});
+    }
+  }
 
-      if (existingPlot) {
-        await Plot.updateOne({ _id: existingPlot._id }, { $set: plotData });
-        plotId = existingPlot._id as mongoose.Types.ObjectId;
-        plotsUpdated++;
-      } else {
-        const newPlot = await Plot.create(plotData);
-        plotId = newPlot._id as mongoose.Types.ObjectId;
-        plotsCreated++;
-      }
+  // ── 4d. Build the payment writes ──────────────────────────────────────────
+  const paymentOps: any[] = [];
+  for (const entry of parsedData) {
+    if (!entry.plotNumber || !entry.block) continue;
+    const plotId = idByKey.get(plotKey(entry.plotNumber, entry.block));
+    if (!plotId) {
+      errorLog.push(`No plot id for ${entry.plotBlock} (year=${entry.year})`);
+      errors++;
+      continue;
+    }
 
-      // ── Upsert Payment ────────────────────────────────────────────────────
-      const payments: Record<string, number | null> = {};
-      let totalReceived = 0;
+    const current = existingByKey.get(`${plotId}:${entry.year}`) || {};
+    const payments: Record<string, number | null> = {};
+    let totalReceived = 0;
 
-      for (const month of MONTHS) {
-        const val = entry.payments[month];
-        payments[month] = val ?? null;
-        if (val !== null && val !== undefined && !isNaN(Number(val))) {
-          totalReceived += Number(val);
+    for (const month of MONTHS) {
+      const sheetVal = entry.payments[month] ?? null;
+
+      if (protectedMonths.has(`${plotId}:${entry.year}:${month}`)) {
+        // Keep what the counter recorded: a receipt and a cash-book entry agree
+        // with it, and the spreadsheet does not know about it.
+        const kept = current[month] ?? null;
+        payments[month] = kept;
+        if (Number(kept || 0) !== Number(sheetVal || 0)) {
+          monthsProtected++;
+          if (protectedLog.length < 20) {
+            protectedLog.push(
+              `${entry.plotBlock} ${month} ${entry.year}: kept ₨${Number(kept || 0).toLocaleString()} (recorded payment) over ₨${Number(sheetVal || 0).toLocaleString()} from the sheet`,
+            );
+          }
         }
+      } else {
+        payments[month] = sheetVal;
       }
 
-      const totalDue = entry.mcRate * 12;
-      const remaining = totalDue - totalReceived;
+      const val = payments[month];
+      if (val !== null && val !== undefined && !isNaN(Number(val))) totalReceived += Number(val);
+    }
 
-      await Payment.findOneAndUpdate(
-        { plot: plotId, year: entry.year },
-        {
+    const totalDue = entry.mcRate * 12;
+    paymentOps.push({
+      updateOne: {
+        filter: { plot: plotId, year: entry.year },
+        update: {
           $set: {
             mcRate: entry.mcRate,
             payments,
             totalReceived,
             totalDue,
-            remaining,
+            remaining: totalDue - totalReceived,
           },
         },
-        { upsert: true, new: true, runValidators: true },
-      );
-      paymentsUpserted++;
+        upsert: true,
+      },
+    });
+  }
+
+  // Chunked so a single oversized command cannot be rejected.
+  const CHUNK = 500;
+  for (let i = 0; i < paymentOps.length; i += CHUNK) {
+    const chunk = paymentOps.slice(i, i + CHUNK);
+    try {
+      await Payment.bulkWrite(chunk, { ordered: false });
+      paymentsUpserted += chunk.length;
+      console.log(`   ✅ Payments ${Math.min(i + CHUNK, paymentOps.length)}/${paymentOps.length}`);
     } catch (err: any) {
       errors++;
-      const msg = `Error for ${entry.plotBlock} (year=${entry.year}): ${err.message}`;
-      errorLog.push(msg);
-      if (errors <= 20) console.error(`  ❌ ${msg}`);
+      errorLog.push(`Payment batch at ${i}: ${err.message}`);
     }
   }
 
@@ -204,7 +315,13 @@ async function seed() {
   console.log(`  Plots updated:         ${plotsUpdated}`);
   console.log(`  Payments upserted:     ${paymentsUpserted}`);
   console.log(`  Errors:                ${errors}`);
+  console.log(`  Months protected:      ${monthsProtected}`);
   console.log("=".repeat(55));
+
+  if (protectedLog.length > 0) {
+    console.log("\n🔒 Kept over the spreadsheet (a recorded payment covers them):");
+    protectedLog.forEach((e) => console.log(`   - ${e}`));
+  }
 
   if (errorLog.length > 0) {
     console.log("\n⚠️  Error details (first 20):");

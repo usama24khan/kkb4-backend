@@ -17,12 +17,20 @@
  * live ones written by Accounts → Record Payment — are skipped, so re-running
  * never duplicates. Run it once per environment after deploying the cash book.
  *
- * Usage:
- *   npx ts-node src/scripts/backfillFinanceLedger.ts        # apply
- *   npx ts-node src/scripts/backfillFinanceLedger.ts --dry  # preview only
+ * Which database it touches comes from NODE_ENV, so the npm aliases are the safe
+ * way to run it:
+ *   npm run backfill:finance-ledger:dry        # development, preview only
+ *   npm run backfill:finance-ledger            # development, apply
+ *   npm run backfill:finance-ledger:prod:dry   # production, preview only
+ *   npm run backfill:finance-ledger:prod       # production, apply
+ *
+ * It prints the environment and database it connected to before doing anything,
+ * because "did I just run that against production?" is not a question anyone
+ * should have to answer from memory.
  */
 import mongoose from 'mongoose';
 import { connectDB } from '../config/db';
+import { env } from '../config/env';
 import Payment from '../models/Payment';
 import Collection from '../models/Collection';
 import { MONTHS } from '../config/constants';
@@ -33,7 +41,10 @@ async function main() {
 
   await connectDB();
   console.log(`\nKKB4 — Finance ledger backfill${dryRun ? ' (DRY RUN)' : ''}`);
-  console.log('═══════════════════════════════════════════════════════════\n');
+  console.log('═══════════════════════════════════════════════════════════');
+  console.log(`Environment: ${env.NODE_ENV}`);
+  console.log(`Database:    ${mongoose.connection.name} @ ${mongoose.connection.host}`);
+  console.log('');
 
   const payments = await Payment.find().sort({ plot: 1, year: 1 }).lean();
   console.log(`Payment records found: ${payments.length}`);

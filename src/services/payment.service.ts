@@ -1,5 +1,6 @@
 import Payment, { IPayment } from '../models/Payment';
 import Plot from '../models/Plot';
+import Collection from '../models/Collection';
 import { MONTHS, getMcRateForYear } from '../config/constants';
 import { Types } from 'mongoose';
 
@@ -16,6 +17,45 @@ function recalcTotals(payment: IPayment): void {
   payment.totalReceived = total;
   payment.totalDue = payment.mcRate * 12;
   payment.remaining = payment.totalDue - payment.totalReceived;
+}
+
+/** A month the grid refused to reduce, because a recorded payment covers it. */
+export interface BlockedMonth {
+  plotId: string;
+  year: number;
+  month: string;
+  keptAmount: number;
+  attemptedAmount: number;
+}
+
+/**
+ * Months that a live cash-book entry has paid for, for the given plots.
+ *
+ * The grid writes dues directly, with no effect on the cash book. That is right
+ * for loading old records and wrong for anything the society has actually banked:
+ * clearing such a month would leave income in the accounts, a receipt in the
+ * owner's hand, and nothing on their record to match. Those months are therefore
+ * off limits to the grid — they are changed by voiding the payment in Accounts,
+ * which reverses the dues, the income and the receipt together.
+ */
+async function loadLedgerBackedMonths(plotIds: string[]): Promise<Set<string>> {
+  const backed = new Set<string>();
+  if (plotIds.length === 0) return backed;
+
+  const live = await Collection.find({
+    plot: { $in: plotIds },
+    isVoided: false,
+    countInCashBook: true,
+  })
+    .select('plot allocations')
+    .lean();
+
+  for (const entry of live as any[]) {
+    for (const alloc of entry.allocations || []) {
+      backed.add(`${entry.plot}:${alloc.year}:${String(alloc.month).toLowerCase()}`);
+    }
+  }
+  return backed;
 }
 
 export class PaymentService {
@@ -193,7 +233,9 @@ export class PaymentService {
   static async bulkUpdate(entries: Array<{ plotId: string; amount: number }>, year: number, month: string) {
     const results = [];
     const deltas: Array<{ plotId: string; allocations: Array<{ year: number; month: string; amount: number }> }> = [];
+    const blocked: BlockedMonth[] = [];
     const defaultRate = getMcRateForYear(year);
+    const ledgerBacked = await loadLedgerBackedMonths(entries.map((e) => e.plotId));
 
     for (const entry of entries) {
       let payment = await Payment.findOne({ plot: entry.plotId, year });
@@ -208,7 +250,17 @@ export class PaymentService {
       }
 
       const before = Number((payment.payments as any)[month]) || 0;
-      const increase = (Number(entry.amount) || 0) - before;
+      const next = Number(entry.amount) || 0;
+      const increase = next - before;
+
+      // A reduction to a month the cash book has paid for is refused here. Doing
+      // it would strand the income and the receipt; voiding the payment in
+      // Accounts undoes all three together.
+      if (increase < 0 && ledgerBacked.has(`${entry.plotId}:${year}:${month}`)) {
+        blocked.push({ plotId: entry.plotId, year, month, keptAmount: before, attemptedAmount: next });
+        continue;
+      }
+
       if (increase > 0) {
         deltas.push({ plotId: entry.plotId, allocations: [{ year, month, amount: increase }] });
       }
@@ -230,7 +282,7 @@ export class PaymentService {
       results.push(saved);
     }
 
-    return { results, deltas };
+    return { results, deltas, blocked };
   }
 
   /**
@@ -248,7 +300,9 @@ export class PaymentService {
   ) {
     const results = [];
     const deltas: Array<{ plotId: string; allocations: Array<{ year: number; month: string; amount: number }> }> = [];
+    const blocked: BlockedMonth[] = [];
     const defaultRate = getMcRateForYear(year);
+    const ledgerBacked = await loadLedgerBackedMonths(entries.map((e) => e.plotId));
 
     for (const entry of entries) {
       let payment = await Payment.findOne({ plot: entry.plotId, year });
@@ -268,6 +322,14 @@ export class PaymentService {
         const before = Number((payment.payments as any)[m]) || 0;
         const next = v === null || (v as any) === '' ? null : Number(v) || 0;
         const increase = (next || 0) - before;
+
+        // See bulkUpdate: the grid may not take money off a month the cash book
+        // has already banked.
+        if (increase < 0 && ledgerBacked.has(`${entry.plotId}:${year}:${m}`)) {
+          blocked.push({ plotId: entry.plotId, year, month: m, keptAmount: before, attemptedAmount: next || 0 });
+          continue;
+        }
+
         if (increase > 0) increases.push({ year, month: m, amount: increase });
         (payment.payments as any)[m] = next;
       }
@@ -277,7 +339,7 @@ export class PaymentService {
       results.push(await payment.save());
     }
 
-    return { results, deltas };
+    return { results, deltas, blocked };
   }
 
   static async getPaymentsByBlock(block: string, year: number) {

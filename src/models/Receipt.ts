@@ -29,6 +29,12 @@ export interface IReceipt extends Document {
   paymentDate: Date;
   dateFrom?: Date | null;       // optional period start
   dateTo?: Date | null;         // optional period end
+  /**
+   * Every month this payment settled, oldest first — what the owner is actually
+   * holding a receipt for. `month`/`year` above name only the first of them, so
+   * a slip covering four months could not otherwise say so.
+   */
+  coveredMonths: { year: number; month: string }[];
 
   // Meta
   societyName: string;          // Default: "KKB Housing Society"
@@ -66,6 +72,18 @@ const ReceiptSchema = new Schema<IReceipt>(
     paymentDate: { type: Date, default: () => new Date() },
     dateFrom: { type: Date, default: null },
     dateTo: { type: Date, default: null },
+    coveredMonths: {
+      type: [
+        new Schema<{ year: number; month: string }>(
+          {
+            year: { type: Number, required: true },
+            month: { type: String, required: true, lowercase: true, trim: true },
+          },
+          { _id: false, timestamps: false },
+        ),
+      ],
+      default: [],
+    },
 
     societyName: { type: String, default: "KKB Housing Society", trim: true },
     isVerified: { type: Boolean, default: true },

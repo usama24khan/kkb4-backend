@@ -76,6 +76,62 @@ const EN_TO_UR_MONTH: Record<string, string> = {
   December: "دسمبر",
 };
 
+const MONTH_KEYS = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/**
+ * The months a payment settled, written for the slip.
+ *
+ * A receipt has to answer "what did I just pay for", and one month name could not:
+ * ₨2,000 clearing ten months of 2012 printed as "January". So:
+ *
+ *   one month            → "July 2026"
+ *   an unbroken run      → "January 2012 - October 2012 (10 months)"
+ *   gaps in the run      → "Jan 2012, Mar 2012, Apr 2012 (3 months)"
+ *
+ * Short names in the gappy case because the field is one line and truncates; a
+ * long list stops after six and counts the rest.
+ */
+export function formatCoveredMonths(
+  covered: { year: number; month: string }[] | undefined,
+  lang: "en" | "ur",
+): string | null {
+  if (!covered || covered.length === 0) return null;
+
+  const ord = (m: { year: number; month: string }) =>
+    m.year * 12 + MONTH_KEYS.indexOf(String(m.month).toLowerCase());
+  const sorted = [...covered].sort((a, b) => ord(a) - ord(b));
+
+  const longName = (m: { year: number; month: string }) => {
+    const idx = MONTH_KEYS.indexOf(String(m.month).toLowerCase());
+    const en = MONTH_NAMES[idx] || String(m.month);
+    return `${lang === "ur" ? EN_TO_UR_MONTH[en] || en : en} ${m.year}`;
+  };
+  const shortName = (m: { year: number; month: string }) => {
+    const idx = MONTH_KEYS.indexOf(String(m.month).toLowerCase());
+    const en = MONTH_NAMES[idx] || String(m.month);
+    return `${lang === "ur" ? EN_TO_UR_MONTH[en] || en : en.slice(0, 3)} ${m.year}`;
+  };
+
+  if (sorted.length === 1) return longName(sorted[0]);
+
+  const count = sorted.length;
+  const suffix = lang === "ur" ? `(${count} ماہ)` : `(${count} months)`;
+
+  const contiguous = sorted.every((m, i) => i === 0 || ord(m) === ord(sorted[i - 1]) + 1);
+  if (contiguous) {
+    return `${longName(sorted[0])} - ${longName(sorted[count - 1])} ${suffix}`;
+  }
+
+  const shown = sorted.slice(0, 6).map(shortName).join(", ");
+  const rest = count - Math.min(6, count);
+  const more = rest > 0 ? (lang === "ur" ? ` + ${rest} مزید` : ` +${rest} more`) : "";
+  return `${shown}${more} ${suffix}`;
+}
+
 // ─── Public types ──────────────────────────────────────────────────────────
 
 export interface ReceiptResult {
@@ -167,8 +223,9 @@ function renderEnglishSlip(
       });
   };
 
+  // The date the money came in sits at the top, where a receipt is read first.
   field("Receipt No.", r.receiptNumber, left, y, colW);
-  field("Date", fmtDate(r.paymentDate), left + colW + colGap, y, colW);
+  field("Received On", fmtDate(r.paymentDate), left + colW + colGap, y, colW);
   y += rowH + 12;
 
   field("Block No.", r.blockNo, left, y, colW);
@@ -178,20 +235,25 @@ function renderEnglishSlip(
   field("Received From (Owner)", r.ownerName, left, y, innerW);
   y += rowH + 12;
 
-  field("Month", r.month || "—", left, y, colW);
-  field("Year", r.year ? String(r.year) : "—", left + colW + colGap, y, colW);
-  y += rowH + 12;
-
-  // Optional payment period (date range)
-  if (r.dateFrom && r.dateTo) {
-    field(
-      "Period",
-      `${fmtDate(r.dateFrom)} - ${fmtDate(r.dateTo)}`,
-      left,
-      y,
-      innerW,
-    );
+  // What the money paid for. Every settled month is named across the full width,
+  // because the old Month/Year pair could only show the first one — and printed
+  // the year the slip was issued next to it, so arrears read "January 2026" for a
+  // payment covering 2012.
+  const paidFor = formatCoveredMonths(r.coveredMonths, "en");
+  if (paidFor) {
+    field("Paid For", paidFor, left, y, innerW);
     y += rowH + 12;
+  } else {
+    // Receipts written before covered months were recorded, and receipt-only
+    // slips, still have just the one month.
+    field("Month", r.month || "—", left, y, colW);
+    field("Year", r.year ? String(r.year) : "—", left + colW + colGap, y, colW);
+    y += rowH + 12;
+
+    if (r.dateFrom && r.dateTo) {
+      field("Period", `${fmtDate(r.dateFrom)} - ${fmtDate(r.dateTo)}`, left, y, innerW);
+      y += rowH + 12;
+    }
   }
   y += 4;
 
@@ -413,7 +475,7 @@ function renderUrduSlip(
 
   // Row 1: Receipt number (right) | Date (left)
   urduField("رسید نمبر", p.receiptNumber, rightColX, y, colW, false);
-  urduField("تاریخ", fmtDate(p.paymentDate), leftColX, y, colW, false);
+  urduField("موصولی کی تاریخ", fmtDate(p.paymentDate), leftColX, y, colW, false);
   y += rowH;
 
   // Row 2: Block (right) | Plot (left)
@@ -425,17 +487,23 @@ function renderUrduSlip(
   urduField("مالک کا نام", p.ownerName || "", innerL, y, innerW);
   y += rowH;
 
-  // Row 4: Month (right) | Year (left)
-  const urMonth = EN_TO_UR_MONTH[p.month] || p.month || "";
-  urduField("مہینہ", urMonth, rightColX, y, colW);
-  urduField("سال", p.year ? String(p.year) : "", leftColX, y, colW, false);
-  y += rowH;
-
-  // Row 5 (optional): Period
-  if (p.dateFrom && p.dateTo) {
-    const period = `${fmtDate(p.dateFrom)} - ${fmtDate(p.dateTo)}`;
-    urduField("دورانیہ", period, innerL, y, innerW, false);
+  // Row 4: every month the payment settled, full width (see the English renderer
+  // for why a single Month/Year pair was not enough).
+  const urPaidFor = formatCoveredMonths(p.coveredMonths, "ur");
+  if (urPaidFor) {
+    urduField("ادا شدہ مہینے", urPaidFor, innerL, y, innerW);
     y += rowH;
+  } else {
+    const urMonth = EN_TO_UR_MONTH[p.month] || p.month || "";
+    urduField("مہینہ", urMonth, rightColX, y, colW);
+    urduField("سال", p.year ? String(p.year) : "", leftColX, y, colW, false);
+    y += rowH;
+
+    if (p.dateFrom && p.dateTo) {
+      const period = `${fmtDate(p.dateFrom)} - ${fmtDate(p.dateTo)}`;
+      urduField("دورانیہ", period, innerL, y, innerW, false);
+      y += rowH;
+    }
   }
   y += mm(4);
 

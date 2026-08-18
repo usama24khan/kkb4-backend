@@ -10,6 +10,7 @@
     "build:prod": "tsc",
     "start": "NODE_ENV=production node dist/app.js",
     "seed": "NODE_ENV=development ts-node src/scripts/seedFromExcel.ts",
+    "check:excel": "NODE_ENV=development ts-node src/scripts/checkExcelImport.ts",
     "migrate:phases": "NODE_ENV=development ts-node src/scripts/migratePhases.ts",
     "migrate:phases:dry": "NODE_ENV=development ts-node src/scripts/migratePhases.ts --dry",
     "backfill:complaint-tracking": "NODE_ENV=development ts-node src/scripts/backfillComplaintTracking.ts",
@@ -18,6 +19,8 @@
     "seed:demo-finance:clean": "NODE_ENV=development ts-node src/scripts/seedDemoFinance.ts --clean",
     "backfill:finance-ledger": "NODE_ENV=development ts-node src/scripts/backfillFinanceLedger.ts",
     "backfill:finance-ledger:dry": "NODE_ENV=development ts-node src/scripts/backfillFinanceLedger.ts --dry",
+    "backfill:finance-ledger:prod": "NODE_ENV=production ts-node src/scripts/backfillFinanceLedger.ts",
+    "backfill:finance-ledger:prod:dry": "NODE_ENV=production ts-node src/scripts/backfillFinanceLedger.ts --dry",
     "backfill:pdf-thumbnails": "NODE_ENV=development ts-node src/scripts/backfillPdfThumbnails.ts",
     "backfill:pdf-thumbnails:dry": "NODE_ENV=development ts-node src/scripts/backfillPdfThumbnails.ts --dry"
   },

@@ -74,8 +74,54 @@ export class PlotService {
     return plot.save();
   }
 
+  /**
+   * Update a plot, keeping its derived fields honest.
+   *
+   * `plotBlock`, `plotCode` and `phase` are what the rest of the app reads — plot
+   * lists, search, the block and phase pages, the payments grid, the AI answers —
+   * so moving a plot to another block has to rewrite all three, or the plot keeps
+   * showing under its old block everywhere.
+   *
+   * They are computed here rather than left to schema middleware: a flat update
+   * object never reaches that middleware's rewrite, so a block change persisted
+   * while `plotBlock` stayed one edit behind. Doing it in the open, from the merged
+   * old and new values, is both correct and visible to whoever reads this next.
+   *
+   * Everything else about a plot refers to it by id — payments, ledger entries,
+   * dues — so those follow a move on their own. Receipts and notices keep the block
+   * they were issued with by design, being records of documents already sent.
+   */
   static async update(id: string, data: Partial<IPlot>) {
-    return Plot.findByIdAndUpdate(id, data, { new: true, runValidators: true });
+    const changesIdentity = data.plotNumber !== undefined || data.block !== undefined;
+    if (!changesIdentity) {
+      return Plot.findByIdAndUpdate(id, data, { new: true, runValidators: true });
+    }
+
+    const current = await Plot.findById(id).select('plotNumber block phase').lean();
+    if (!current) return null;
+
+    const plotNumber = String(data.plotNumber ?? current.plotNumber ?? '').trim();
+    const block = String(data.block ?? current.block ?? '').toUpperCase().trim();
+
+    const next: Record<string, any> = {
+      ...data,
+      plotNumber,
+      block,
+      plotBlock: `${plotNumber} ${block}`.trim(),
+      plotCode: `${plotNumber}-${block}`.trim(),
+    };
+
+    // Constant blocks have an authoritative phase; a custom block is resolved
+    // through the registry, and only overwritten if that lookup finds something.
+    const mappedPhase = BLOCK_PHASE_MAP[block];
+    if (mappedPhase) {
+      next.phase = mappedPhase;
+    } else if (block && block !== current.block) {
+      const resolved = await resolvePhaseForBlock(block);
+      if (resolved) next.phase = resolved;
+    }
+
+    return Plot.findByIdAndUpdate(id, { $set: next }, { new: true, runValidators: true });
   }
 
   static async softDelete(id: string) {

@@ -170,11 +170,16 @@ export const getPlotDues = async (req: Request, res: Response): Promise<void> =>
 
 /**
  * POST /finance/allocation-preview — what would this amount clear, without
- * writing anything. Body: { plotId, amount, receivedDate?, allocateFromYear? }
+ * writing anything.
+ *
+ * Body: { plotId, amount, receivedDate?, allocateFromYear?, startYear?, startMonth? }
+ *
+ * With `startYear`/`startMonth` the split begins at that month and runs forwards,
+ * ignoring older unpaid months; without them it clears oldest-unpaid-first.
  */
 export const previewAllocation = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { plotId, amount, receivedDate, allocateFromYear } = req.body || {};
+    const { plotId, amount, receivedDate, allocateFromYear, startYear, startMonth } = req.body || {};
     if (!Types.ObjectId.isValid(String(plotId))) {
       sendError(res, 'Invalid plot id', 400);
       return;
@@ -185,16 +190,43 @@ export const previewAllocation = async (req: Request, res: Response): Promise<vo
       return;
     }
 
+    const start = parseMonthParam(startMonth);
+    const startYearNum = startYear ? parseInt(String(startYear), 10) : null;
+    if ((start && !startYearNum) || (startYearNum && !start)) {
+      sendError(res, 'startYear and startMonth must be given together', 400);
+      return;
+    }
+
     const period = receivedDate ? toBookPeriod(new Date(receivedDate)) : currentBookPeriod();
     const allocations = await finance.autoAllocate(String(plotId), value, {
       fromYear: allocateFromYear ? Number(allocateFromYear) : undefined,
       throughOrdinal: period.bookYear * 12 + period.bookMonth,
+      ...(start && startYearNum ? { startYear: startYearNum, startMonth: start } : {}),
     });
     const allocated = allocations.reduce((sum, a) => sum + a.amount, 0);
+    // Months that still take money but already hold some — a top-up, worth
+    // stating plainly since the amounts add rather than replace.
+    const conflicts = await finance.findAllocationConflicts(String(plotId), allocations);
+
+    // When the admin named a month that owes nothing, the money has been moved on
+    // to the next month with room. That is rarely what they meant to happen, so it
+    // is reported separately and prominently.
+    const namedMonthSettled =
+      start && startYearNum
+        ? await finance
+            .getMonthStatus(String(plotId), startYearNum, start)
+            .then((status) => (status.owed <= 0 && status.paid > 0 ? status : null))
+        : null;
 
     sendSuccess(
       res,
-      { allocations, allocated, unallocated: Math.max(0, value - allocated) },
+      {
+        allocations,
+        allocated,
+        unallocated: Math.max(0, value - allocated),
+        conflicts,
+        namedMonthSettled,
+      },
       'Allocation preview'
     );
   } catch (error: any) {

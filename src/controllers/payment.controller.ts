@@ -20,6 +20,25 @@ import { recordCollection } from '../services/finance.service';
  */
 type GridMode = 'historical' | 'live';
 
+/**
+ * Explains any month the grid refused to reduce. Those months are backed by a
+ * recorded payment — income in the cash book and, usually, a receipt in the
+ * owner's hand — so the grid leaves them alone and points at the one action that
+ * unwinds all three consistently.
+ */
+function describeBlocked(blocked: Array<{ plotId: string; year: number; month: string; keptAmount: number }>): string {
+  if (blocked.length === 0) return '';
+  const first = blocked
+    .slice(0, 3)
+    .map((b) => `${b.month} ${b.year}`)
+    .join(', ');
+  const more = blocked.length > 3 ? ` and ${blocked.length - 3} more` : '';
+  return (
+    ` · ${blocked.length} month(s) left unchanged (${first}${more}): a recorded payment covers them. ` +
+    `Void that payment in Accounts to reverse the dues, the income and the receipt together.`
+  );
+}
+
 const parseGridMode = (value: unknown): GridMode => (value === 'live' ? 'live' : 'historical');
 
 /**
@@ -141,7 +160,7 @@ export const bulkUpdatePayments = async (req: AuthRequest, res: Response): Promi
 
     const { year, month, entries } = validation.data;
     const mode = parseGridMode(req.body?.mode);
-    const { results, deltas } = await PaymentService.bulkUpdate(entries, year, month);
+    const { results, deltas, blocked } = await PaymentService.bulkUpdate(entries, year, month);
 
     const ledger = mode === 'live' ? await recordGridLedger(deltas, req.admin?.id) : null;
 
@@ -151,16 +170,16 @@ export const bulkUpdatePayments = async (req: AuthRequest, res: Response): Promi
         action: 'bulk_update',
         entity: 'payment',
         entityId: `${validation.data.block}_${year}_${month}`,
-        changes: { entriesCount: entries.length, mode, ledger },
+        changes: { entriesCount: entries.length, mode, ledger, blocked },
       });
     }
 
     sendSuccess(
       res,
       results,
-      ledger
+      (ledger
         ? `${results.length} payments updated · PKR ${ledger.total} added to this month's income`
-        : `${results.length} payments updated`,
+        : `${results.length} payments updated`) + describeBlocked(blocked),
     );
   } catch (error: any) {
     sendError(res, 'Failed to bulk update payments', 500, error.message);
@@ -182,7 +201,7 @@ export const bulkUpdateAllMonths = async (req: AuthRequest, res: Response): Prom
     }
 
     const mode = parseGridMode(req.body?.mode);
-    const { results, deltas } = await PaymentService.bulkUpsertMonths(entries, parseInt(year));
+    const { results, deltas, blocked } = await PaymentService.bulkUpsertMonths(entries, parseInt(year));
 
     const ledger = mode === 'live' ? await recordGridLedger(deltas, req.admin?.id) : null;
 
@@ -192,16 +211,16 @@ export const bulkUpdateAllMonths = async (req: AuthRequest, res: Response): Prom
         action: 'bulk_update',
         entity: 'payment',
         entityId: `${block || 'multi'}_${year}_all`,
-        changes: { entriesCount: entries.length, scope: 'all-months', mode, ledger },
+        changes: { entriesCount: entries.length, scope: 'all-months', mode, ledger, blocked },
       });
     }
 
     sendSuccess(
       res,
       results,
-      ledger
+      (ledger
         ? `${results.length} payments updated · PKR ${ledger.total} added to this month's income`
-        : `${results.length} payments updated`,
+        : `${results.length} payments updated`) + describeBlocked(blocked),
     );
   } catch (error: any) {
     sendError(res, 'Failed to bulk update payments', 500, error.message);

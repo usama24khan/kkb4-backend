@@ -206,32 +206,122 @@ export async function getDuesLadder(
 }
 
 /**
- * Spread `amount` over months oldest-unpaid-first, then into future months.
+ * Spread `amount` over months, at each month's own rate.
+ *
+ * Two modes, because "which months did this money pay for" is the admin's call,
+ * not something to infer:
+ *
+ *  - default: oldest-unpaid-first, then on into future months. Right when an
+ *    owner is clearing a backlog.
+ *  - `startYear`/`startMonth`: begin at that month and run forwards, ignoring
+ *    older unpaid months entirely. Right when the owner says "this is for July"
+ *    — without it, ₨400 handed over in July silently cleared Jan and Feb 2012
+ *    instead, because those were the oldest months owing.
+ *
  * A trailing remainder too small to cover a whole month is still allocated
- * (partial payment against that month) — the ledger keeps `unallocatedAmount`
- * at 0 whenever the money maps onto real months.
+ * (a part-payment against that month), so `unallocatedAmount` stays 0 whenever
+ * the money maps onto real months.
  */
 export async function autoAllocate(
   plotId: string,
   amount: number,
-  opts: { fromYear?: number; throughOrdinal?: number } = {}
+  opts: {
+    fromYear?: number;
+    throughOrdinal?: number;
+    startYear?: number;
+    startMonth?: number;
+  } = {}
 ): Promise<IAllocation[]> {
-  const { arrears, future } = await getDuesLadder(plotId, opts);
-  const ladder = [...arrears, ...future];
+  // When anchored to a month, the ladder has to reach back to that month even if
+  // the plot's own records start later.
+  const { arrears, future } = await getDuesLadder(plotId, {
+    ...opts,
+    fromYear: opts.fromYear ?? opts.startYear,
+  });
+  let ladder = [...arrears, ...future];
+
+  if (opts.startYear && opts.startMonth) {
+    // Anchored to a month the admin named: drop everything before it.
+    const startOrd = periodOrdinal(opts.startYear, opts.startMonth);
+    ladder = ladder.filter((d) => periodOrdinal(d.year, monthNumber(d.month)) >= startOrd);
+  }
 
   const allocations: IAllocation[] = [];
   let left = amount;
 
   for (const due of ladder) {
     if (left <= 0) break;
-    const owed = due.owed > 0 ? due.owed : due.rate;
-    if (owed <= 0) continue;
-    const take = Math.min(left, owed);
+    // A month that owes nothing is passed over, so the money lands on the next
+    // month with room instead of stacking a second full charge onto a month that
+    // is already settled. Partly-paid months still take what they are short.
+    if (due.owed <= 0) continue;
+    const take = Math.min(left, due.owed);
     allocations.push({ year: due.year, month: due.month, amount: take });
     left -= take;
   }
 
   return allocations;
+}
+
+/** What a single month owes, for warning the admin before a payment is recorded. */
+export async function getMonthStatus(
+  plotId: string,
+  year: number,
+  month: number,
+): Promise<{ year: number; month: string; paid: number; rate: number; owed: number }> {
+  const rateMap = await getRateMap();
+  const record: any = await Payment.findOne({ plot: plotId, year }).lean();
+  const rate = record?.mcRate || rateForYear(rateMap, year);
+  const paid = Number(record?.payments?.[monthKey(month)]) || 0;
+  return { year, month: monthKey(month), paid, rate, owed: Math.max(0, rate - paid) };
+}
+
+/** A month an allocation targets that already has money recorded against it. */
+export interface AllocationConflict {
+  year: number;
+  month: string;
+  /** Already recorded against that month. */
+  alreadyPaid: number;
+  /** The month's full charge. */
+  rate: number;
+  /** What the month would hold once this payment is applied. */
+  wouldBecome: number;
+}
+
+/**
+ * Which of these months already have money against them.
+ *
+ * Allocations are added to a month rather than replacing it, so recording ₨400
+ * for a July that already holds ₨400 leaves July at ₨800. That is right for a
+ * genuine top-up and wrong for a payment being entered twice, and only the person
+ * at the counter can tell which — so the UI shows this and lets them decide,
+ * rather than the server silently doing either.
+ */
+export async function findAllocationConflicts(
+  plotId: string,
+  allocations: Array<{ year: number; month: string; amount: number }>,
+): Promise<AllocationConflict[]> {
+  if (!allocations.length) return [];
+
+  const rateMap = await getRateMap();
+  const years = [...new Set(allocations.map((a) => a.year))];
+  const payments = await Payment.find({ plot: plotId, year: { $in: years } }).lean();
+  const byYear = new Map(payments.map((p) => [p.year, p]));
+
+  const conflicts: AllocationConflict[] = [];
+  for (const alloc of allocations) {
+    const record: any = byYear.get(alloc.year);
+    const alreadyPaid = Number(record?.payments?.[String(alloc.month).toLowerCase()]) || 0;
+    if (alreadyPaid <= 0) continue;
+    conflicts.push({
+      year: alloc.year,
+      month: String(alloc.month).toLowerCase(),
+      alreadyPaid,
+      rate: record?.mcRate || rateForYear(rateMap, alloc.year),
+      wouldBecome: alreadyPaid + alloc.amount,
+    });
+  }
+  return conflicts;
 }
 
 /** Reject allocations that reference an impossible month or a negative amount. */
@@ -417,6 +507,9 @@ export async function recordCollection(
         paymentDate: receivedDate,
         dateFrom: first ? monthStart(first.year, monthNumber(first.month)) : null,
         dateTo: last ? monthEnd(last.year, monthNumber(last.month)) : null,
+        // Every month this payment settled, so the slip can name them all rather
+        // than just the first.
+        coveredMonths: allocations.map((a) => ({ year: a.year, month: a.month })),
         societyName: input.societyName?.trim() || undefined,
         isVerified: true,
         collectionRef: collection._id,
