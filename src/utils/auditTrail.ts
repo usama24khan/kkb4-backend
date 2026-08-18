@@ -54,6 +54,43 @@ export function monthLabel(month: string | number, year: number): string {
   return `${pretty} ${year}`;
 }
 
+/**
+ * Field names as a person would say them.
+ *
+ * The stored name is the machine one — that is what makes the record precise —
+ * but a summary written for reading should not say `ownerName`.
+ */
+const FIELD_LABELS: Record<string, string> = {
+  srNo: 'serial number',
+  ownerName: 'owner',
+  plotNumber: 'plot number',
+  block: 'block',
+  phase: 'phase',
+  plotBlock: 'plot',
+  plotCode: 'plot code',
+  allotmentStatus: 'allotment status',
+  isActive: 'active',
+  ownerPhone: 'phone',
+  ownerCnic: 'CNIC',
+  monthlyChargeOverride: 'monthly charge',
+  amount: 'amount',
+  title: 'title',
+  categoryName: 'category',
+  paidTo: 'paid to',
+  method: 'method',
+  note: 'note',
+  expenseDate: 'expense date',
+  openingBalance: 'opening balance',
+};
+
+export function fieldLabel(field: string): string {
+  if (field.startsWith('payments.')) {
+    const month = field.slice('payments.'.length);
+    return month.charAt(0).toUpperCase() + month.slice(1);
+  }
+  return FIELD_LABELS[field] || field;
+}
+
 /** PKR with thousands separators, for summaries. */
 export function money(amount: number): string {
   return `PKR ${Math.round(amount || 0).toLocaleString('en-US')}`;

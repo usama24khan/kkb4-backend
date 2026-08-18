@@ -4,7 +4,7 @@ import Collection from '../models/Collection';
 import Expense from '../models/Expense';
 import ExpenseCategory from '../models/ExpenseCategory';
 import FinanceSettings from '../models/FinanceSettings';
-import { logAudit, monthLabel, money, diffFields } from '../utils/auditTrail';
+import { logAudit, monthLabel, money, diffFields, fieldLabel } from '../utils/auditTrail';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { ViewerRequest } from '../middleware/anyAuth.middleware';
 import { sendSuccess, sendError } from '../utils/responseHelper';
@@ -533,7 +533,9 @@ export const updateExpense = async (req: AuthRequest, res: Response): Promise<vo
       entityId: expense._id.toString(),
       summary: editDiffs.length
         ? `Edited the expense "${expense.title}": ` +
-          editDiffs.map((d) => `${d.field} ${String(d.from ?? '—')} → ${String(d.to ?? '—')}`).join(', ')
+          editDiffs
+            .map((d) => `${fieldLabel(d.field)} ${String(d.from ?? '—')} → ${String(d.to ?? '—')}`)
+            .join(', ')
         : `Saved the expense "${expense.title}" with nothing changed`,
       diffs: editDiffs,
       changes: req.body,

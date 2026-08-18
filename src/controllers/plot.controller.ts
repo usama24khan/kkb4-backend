@@ -3,7 +3,7 @@ import { PlotService } from '../services/plot.service';
 import { createPlotSchema, updatePlotSchema } from '../validations/plot.validation';
 import { sendSuccess, sendError, sendPaginated } from '../utils/responseHelper';
 import Plot from '../models/Plot';
-import { logAudit, diffFields } from '../utils/auditTrail';
+import { logAudit, diffFields, fieldLabel } from '../utils/auditTrail';
 import { AuthRequest } from '../middleware/auth.middleware';
 
 export const getPlots = async (req: Request, res: Response): Promise<void> => {
@@ -110,9 +110,8 @@ export const updatePlot = async (req: AuthRequest, res: Response): Promise<void>
     }
 
     const diffs = diffFields(before || {}, plot as any, [
-      'plotNumber', 'block', 'phase', 'plotBlock', 'ownerName', 'fatherName',
-      'contactNumber', 'cnic', 'address', 'plotSize', 'allotmentStatus',
-      'possessionStatus', 'monthlyChargeOverride', 'note', 'isActive',
+      'srNo', 'ownerName', 'plotNumber', 'block', 'phase', 'plotBlock', 'plotCode',
+      'allotmentStatus', 'isActive', 'ownerPhone', 'ownerCnic', 'monthlyChargeOverride',
     ]);
     await logAudit({
       admin: req.admin?.id,
@@ -122,7 +121,9 @@ export const updatePlot = async (req: AuthRequest, res: Response): Promise<void>
       plot: plotId,
       summary: diffs.length
         ? `Edited plot ${plot.plotBlock}: ` +
-          diffs.map((d) => `${d.field} "${d.from ?? '—'}" → "${d.to ?? '—'}"`).join(', ')
+          diffs
+            .map((d) => `${fieldLabel(d.field)} "${d.from ?? '—'}" → "${d.to ?? '—'}"`)
+            .join(', ')
         : `Saved plot ${plot.plotBlock} with nothing changed`,
       diffs,
       changes: validation.data,
