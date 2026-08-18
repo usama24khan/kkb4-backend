@@ -4,7 +4,7 @@ import Collection from '../models/Collection';
 import Expense from '../models/Expense';
 import ExpenseCategory from '../models/ExpenseCategory';
 import FinanceSettings from '../models/FinanceSettings';
-import AuditLog from '../models/AuditLog';
+import { logAudit, monthLabel, money, diffFields } from '../utils/auditTrail';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { ViewerRequest } from '../middleware/anyAuth.middleware';
 import { sendSuccess, sendError } from '../utils/responseHelper';
@@ -266,22 +266,33 @@ export const createCollection = async (req: AuthRequest, res: Response): Promise
       req.admin?.id
     );
 
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'create',
-        entity: 'collection',
-        entityId: collection._id.toString(),
-        changes: {
-          plot: String(b.plotId),
-          amount: collection.amount,
-          entryType: collection.entryType,
-          bookPeriod: `${collection.bookYear}-${collection.bookMonth}`,
-          allocations: collection.allocations,
-          receiptNumber: receipt?.receiptNumber || null,
-        },
-      });
-    }
+    const covered = (collection.allocations || [])
+      .map((a: any) => monthLabel(a.month, a.year))
+      .join(', ');
+    await logAudit({
+      admin: req.admin?.id,
+      action: 'create',
+      entity: 'collection',
+      entityId: collection._id.toString(),
+      plot: String(b.plotId),
+      summary:
+        `Received ${money(collection.amount)}` +
+        (covered ? ` for ${covered}` : ' (not yet assigned to any month)') +
+        `, counted in ${monthLabel(collection.bookMonth, collection.bookYear)}` +
+        (receipt?.receiptNumber ? `, receipt ${receipt.receiptNumber}` : ', no receipt issued'),
+      diffs: (collection.allocations || []).map((a: any) => ({
+        field: `payments.${String(a.month).toLowerCase()}`,
+        from: null,
+        to: a.amount,
+      })),
+      changes: {
+        amount: collection.amount,
+        entryType: collection.entryType,
+        bookPeriod: `${collection.bookYear}-${collection.bookMonth}`,
+        allocations: collection.allocations,
+        receiptNumber: receipt?.receiptNumber || null,
+      },
+    });
 
     sendSuccess(res, { collection, receipt }, 'Payment recorded', 201);
   } catch (error: any) {
@@ -301,15 +312,27 @@ export const voidCollectionEntry = async (req: AuthRequest, res: Response): Prom
       return;
     }
 
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'void',
-        entity: 'collection',
-        entityId: collection._id.toString(),
-        changes: { amount: collection.amount, reason: req.body?.reason || '' },
-      });
-    }
+    const voidedMonths = (collection.allocations || [])
+      .map((a: any) => monthLabel(a.month, a.year))
+      .join(', ');
+    await logAudit({
+      admin: req.admin?.id,
+      action: 'void',
+      entity: 'collection',
+      entityId: collection._id.toString(),
+      plot: String((collection as any).plot || ''),
+      summary:
+        `Voided a payment of ${money(collection.amount)}` +
+        (voidedMonths ? ` covering ${voidedMonths}` : '') +
+        `. The dues, the income and the receipt were all reversed` +
+        (req.body?.reason ? `. Reason: ${req.body.reason}` : ''),
+      diffs: (collection.allocations || []).map((a: any) => ({
+        field: `payments.${String(a.month).toLowerCase()}`,
+        from: a.amount,
+        to: 0,
+      })),
+      changes: { amount: collection.amount, reason: req.body?.reason || '' },
+    });
 
     sendSuccess(res, collection, 'Payment voided');
   } catch (error: any) {
@@ -411,15 +434,18 @@ export const createExpense = async (req: AuthRequest, res: Response): Promise<vo
       recordedBy: req.admin?.id || null,
     });
 
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'create',
-        entity: 'expense',
-        entityId: expense._id.toString(),
-        changes: { title, amount, categoryName, bookPeriod: `${expense.bookYear}-${expense.bookMonth}` },
-      });
-    }
+    await logAudit({
+      admin: req.admin?.id,
+      action: 'create',
+      entity: 'expense',
+      entityId: expense._id.toString(),
+      summary:
+        `Added an expense of ${money(amount)} — ${title}` +
+        (categoryName ? ` (${categoryName})` : '') +
+        `, charged to ${monthLabel(expense.bookMonth, expense.bookYear)}`,
+      diffs: [{ field: 'amount', from: null, to: amount }],
+      changes: { title, amount, categoryName, bookPeriod: `${expense.bookYear}-${expense.bookMonth}` },
+    });
 
     sendSuccess(res, expense, 'Expense recorded', 201);
   } catch (error: any) {
@@ -435,6 +461,17 @@ export const updateExpense = async (req: AuthRequest, res: Response): Promise<vo
       sendError(res, 'Expense not found', 404);
       return;
     }
+
+    // Snapshot the values the audit entry will compare against.
+    const beforeEdit = {
+      title: expense.title,
+      amount: expense.amount,
+      categoryName: expense.categoryName,
+      paidTo: expense.paidTo,
+      method: expense.method,
+      note: expense.note,
+      expenseDate: expense.expenseDate?.toISOString?.().slice(0, 10),
+    };
 
     const b = req.body || {};
     if (b.title !== undefined) expense.title = String(b.title).trim();
@@ -471,17 +508,36 @@ export const updateExpense = async (req: AuthRequest, res: Response): Promise<vo
     if (b.note !== undefined) expense.note = String(b.note);
     if (b.attachmentUrl !== undefined) expense.attachmentUrl = String(b.attachmentUrl);
 
+    // Compared against the values loaded at the start of this handler, so the
+    // entry can show what moved rather than echoing the request body.
+    const editDiffs = diffFields(
+      beforeEdit,
+      {
+        title: expense.title,
+        amount: expense.amount,
+        categoryName: expense.categoryName,
+        paidTo: expense.paidTo,
+        method: expense.method,
+        note: expense.note,
+        expenseDate: expense.expenseDate?.toISOString?.().slice(0, 10),
+      },
+      ['title', 'amount', 'categoryName', 'paidTo', 'method', 'note', 'expenseDate'],
+    );
+
     await expense.save();
 
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'update',
-        entity: 'expense',
-        entityId: expense._id.toString(),
-        changes: req.body,
-      });
-    }
+    await logAudit({
+      admin: req.admin?.id,
+      action: 'update',
+      entity: 'expense',
+      entityId: expense._id.toString(),
+      summary: editDiffs.length
+        ? `Edited the expense "${expense.title}": ` +
+          editDiffs.map((d) => `${d.field} ${String(d.from ?? '—')} → ${String(d.to ?? '—')}`).join(', ')
+        : `Saved the expense "${expense.title}" with nothing changed`,
+      diffs: editDiffs,
+      changes: req.body,
+    });
 
     sendSuccess(res, expense, 'Expense updated');
   } catch (error: any) {
@@ -510,11 +566,16 @@ export const voidExpense = async (req: AuthRequest, res: Response): Promise<void
     }
 
     if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
+      await logAudit({
+        admin: req.admin?.id,
         action: 'void',
         entity: 'expense',
         entityId: expense._id.toString(),
+        summary:
+          `Voided the expense "${expense.title}" of ${money(expense.amount)}, ` +
+          `so it no longer counts against ${monthLabel(expense.bookMonth, expense.bookYear)}` +
+          (req.body?.reason ? `. Reason: ${req.body.reason}` : ''),
+        diffs: [{ field: 'amount', from: expense.amount, to: 0 }],
         changes: { amount: expense.amount, reason: req.body?.reason || '' },
       });
     }
@@ -593,11 +654,17 @@ export const copyMonthExpenses = async (req: AuthRequest, res: Response): Promis
     );
 
     if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
+      await logAudit({
+        admin: req.admin?.id,
         action: 'create',
         entity: 'expense',
         entityId: `copy_${fromYear}-${fromMonth}_to_${toYear}-${toMonth}`,
+        summary:
+          `Copied ${created.length} expense(s) from ${monthLabel(fromMonth, fromYear)} ` +
+          `into ${monthLabel(toMonth, toYear)}, totalling ` +
+          money(created.reduce((sum: number, e: any) => sum + (e.amount || 0), 0)) +
+          (skipped > 0 ? `. ${skipped} were skipped as already present` : ''),
+        diffs: [],
         changes: { count: created.length, skipped },
       });
     }
@@ -724,6 +791,10 @@ export const updateFinanceSettings = async (req: AuthRequest, res: Response): Pr
     }
     if (req.body?.note !== undefined) update.note = String(req.body.note);
 
+    // Read first, so the entry can say what the balance was before.
+    const priorSettings: any = await FinanceSettings.findOne({ key: 'default' }).select('openingBalance').lean();
+    const previousOpening = priorSettings?.openingBalance ?? 0;
+
     const settings = await FinanceSettings.findOneAndUpdate(
       { key: 'default' },
       { $set: update, $setOnInsert: { key: 'default' } },
@@ -731,11 +802,20 @@ export const updateFinanceSettings = async (req: AuthRequest, res: Response): Pr
     );
 
     if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
+      await logAudit({
+        admin: req.admin?.id,
         action: 'update',
         entity: 'financeSettings',
         entityId: settings._id.toString(),
+        summary:
+          update.openingBalance !== undefined
+            ? `Set the opening balance to ${money(update.openingBalance)}, which every month's ` +
+              `total savings is counted from`
+            : 'Updated the accounts settings',
+        diffs:
+          update.openingBalance !== undefined
+            ? [{ field: 'openingBalance', from: previousOpening, to: update.openingBalance }]
+            : [],
         changes: update,
       });
     }

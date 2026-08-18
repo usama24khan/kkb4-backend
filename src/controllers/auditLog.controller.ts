@@ -20,8 +20,11 @@ export const getAuditLog = async (req: Request, res: Response): Promise<void> =>
     const action = req.query.action as string;
 
     if (plotId) {
-      filter.entityId = plotId;
-      filter.entity = 'plot';
+      // A plot's history is everything done *to* that plot, not only edits of
+      // the plot record: payments, receipts and voids are keyed by their own ids
+      // and point back through `plot`. Older entries predate that field, so the
+      // plot's own entityId is still matched.
+      filter.$or = [{ plot: plotId }, { entity: 'plot', entityId: plotId }];
     }
     if (entity) filter.entity = entity;
     if (entityId) filter.entityId = entityId;
@@ -34,6 +37,7 @@ export const getAuditLog = async (req: Request, res: Response): Promise<void> =>
         .skip((page - 1) * limit)
         .limit(limit)
         .populate('admin', 'name email')
+        .populate('plot', 'plotBlock ownerName')
         .lean(),
       AuditLog.countDocuments(filter),
     ]);

@@ -1,8 +1,9 @@
 import { Request, Response } from 'express';
-import { PaymentService, LedgerBackedError } from '../services/payment.service';
+import { PaymentService, LedgerBackedError, type MonthMovement } from '../services/payment.service';
 import { updatePaymentSchema, bulkPaymentSchema } from '../validations/payment.validation';
 import { sendSuccess, sendError } from '../utils/responseHelper';
-import AuditLog from '../models/AuditLog';
+import Payment from '../models/Payment';
+import { logAudit, monthLabel, money, diffMonths } from '../utils/auditTrail';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { recordCollection } from '../services/finance.service';
 
@@ -94,6 +95,44 @@ async function recordGridLedger(
   return { recorded, total, failed };
 }
 
+/**
+ * Record a grid save as one entry per plot whose months actually moved.
+ *
+ * A single roll-up entry ("23 plots updated") is not something anyone can check
+ * later. Per plot, with each month's before and after, is: a plot's own history
+ * then shows the money changes made against it, which is what an audit trail is
+ * opened for.
+ */
+async function auditMonthMovements(
+  movements: MonthMovement[],
+  adminId: string | undefined,
+  context: { block?: string; mode: GridMode; ledgerTotal?: number },
+): Promise<void> {
+  for (const move of movements) {
+    const net = move.months.reduce((sum, m) => sum + (m.to - m.from), 0);
+    const monthNames = move.months.map((m) => monthLabel(m.month, move.year)).join(', ');
+    const direction = net > 0 ? 'increased' : net < 0 ? 'reduced' : 'changed';
+    await logAudit({
+      admin: adminId,
+      action: 'update',
+      entity: 'payment',
+      entityId: `${move.plotId}_${move.year}`,
+      plot: move.plotId,
+      summary:
+        `Payments ${direction} by ${money(Math.abs(net))} for ${monthNames}` +
+        (context.mode === 'live'
+          ? ' — recorded as money received today and added to this month\'s income'
+          : ' — entered as an old record, not counted as income'),
+      diffs: move.months.map((m) => ({
+        field: `payments.${m.month}`,
+        from: m.from,
+        to: m.to,
+      })),
+      changes: { year: move.year, block: context.block, mode: context.mode, net },
+    });
+  }
+}
+
 export const getPaymentByPlotYear = async (req: Request, res: Response): Promise<void> => {
   try {
     const { plotId, year } = req.query;
@@ -139,21 +178,34 @@ export const updatePayment = async (req: AuthRequest, res: Response): Promise<vo
       return;
     }
 
+    // Read the record first so the entry can say what the values were.
+    const before: any = await Payment.findById(paymentId).select('plot year payments').lean();
     const payment = await PaymentService.update(paymentId, validation.data as any);
     if (!payment) {
       sendError(res, 'Payment not found', 404);
       return;
     }
 
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'update',
-        entity: 'payment',
-        entityId: paymentId,
-        changes: validation.data,
-      });
-    }
+    const diffs = diffMonths(before?.payments, (payment as any).payments);
+    await logAudit({
+      admin: req.admin?.id,
+      action: 'update',
+      entity: 'payment',
+      entityId: paymentId,
+      plot: String(before?.plot || (payment as any).plot),
+      summary: diffs.length
+        ? `Edited ${(payment as any).year} payments: ` +
+          diffs
+            .map(
+              (d) =>
+                `${monthLabel(d.field.replace('payments.', ''), (payment as any).year)} ` +
+                `${money(d.from)} → ${money(d.to)}`,
+            )
+            .join(', ')
+        : `Saved ${(payment as any).year} payments with no month changed`,
+      diffs,
+      changes: validation.data,
+    });
 
     sendSuccess(res, payment, 'Payment updated');
   } catch (error: any) {
@@ -173,19 +225,15 @@ export const bulkUpdatePayments = async (req: AuthRequest, res: Response): Promi
 
     const { year, month, entries } = validation.data;
     const mode = parseGridMode(req.body?.mode);
-    const { results, deltas, blocked } = await PaymentService.bulkUpdate(entries, year, month);
+    const { results, deltas, blocked, movements } = await PaymentService.bulkUpdate(entries, year, month);
 
     const ledger = mode === 'live' ? await recordGridLedger(deltas, req.admin?.id) : null;
 
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'bulk_update',
-        entity: 'payment',
-        entityId: `${validation.data.block}_${year}_${month}`,
-        changes: { entriesCount: entries.length, mode, ledger, blocked },
-      });
-    }
+    await auditMonthMovements(movements, req.admin?.id, {
+      block: validation.data.block,
+      mode,
+      ledgerTotal: ledger?.total,
+    });
 
     sendSuccess(
       res,
@@ -214,19 +262,14 @@ export const bulkUpdateAllMonths = async (req: AuthRequest, res: Response): Prom
     }
 
     const mode = parseGridMode(req.body?.mode);
-    const { results, deltas, blocked } = await PaymentService.bulkUpsertMonths(entries, parseInt(year));
+    const { results, deltas, blocked, movements } = await PaymentService.bulkUpsertMonths(
+      entries,
+      parseInt(year),
+    );
 
     const ledger = mode === 'live' ? await recordGridLedger(deltas, req.admin?.id) : null;
 
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'bulk_update',
-        entity: 'payment',
-        entityId: `${block || 'multi'}_${year}_all`,
-        changes: { entriesCount: entries.length, scope: 'all-months', mode, ledger, blocked },
-      });
-    }
+    await auditMonthMovements(movements, req.admin?.id, { block, mode, ledgerTotal: ledger?.total });
 
     sendSuccess(
       res,
@@ -249,17 +292,25 @@ export const createOrUpdatePayment = async (req: AuthRequest, res: Response): Pr
       return;
     }
 
+    const before: any = await Payment.findOne({ plot: plotId, year }).select('payments').lean();
     const payment = await PaymentService.upsert(plotId, year, req.body);
 
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'upsert',
-        entity: 'payment',
-        entityId: payment._id.toString(),
-        changes: req.body,
-      });
-    }
+    const diffs = diffMonths(before?.payments, (payment as any).payments);
+    await logAudit({
+      admin: req.admin?.id,
+      action: before ? 'update' : 'create',
+      entity: 'payment',
+      entityId: payment._id.toString(),
+      plot: plotId,
+      summary: diffs.length
+        ? `${before ? 'Updated' : 'Created'} ${year} payments: ` +
+          diffs
+            .map((d) => `${monthLabel(d.field.replace('payments.', ''), year)} ${money(d.from)} → ${money(d.to)}`)
+            .join(', ')
+        : `${before ? 'Saved' : 'Created'} the ${year} payment record with no month changed`,
+      diffs,
+      changes: req.body,
+    });
 
     sendSuccess(res, payment, 'Payment saved');
   } catch (error: any) {
@@ -271,21 +322,25 @@ export const createOrUpdatePayment = async (req: AuthRequest, res: Response): Pr
 export const deletePayment = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { paymentId } = req.params;
+    const before: any = await Payment.findById(paymentId).select('plot year payments totalReceived').lean();
     const deleted = await PaymentService.deletePayment(paymentId);
     if (!deleted) {
       sendError(res, 'Payment not found', 404);
       return;
     }
 
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'delete',
-        entity: 'payment',
-        entityId: paymentId,
-        changes: { deleted: true },
-      });
-    }
+    await logAudit({
+      admin: req.admin?.id,
+      action: 'delete',
+      entity: 'payment',
+      entityId: paymentId,
+      plot: String(before?.plot || ''),
+      summary:
+        `Deleted the whole ${before?.year} payment record` +
+        (before?.totalReceived ? `, which held ${money(before.totalReceived)}` : ' (it was empty)'),
+      diffs: diffMonths(before?.payments, {}),
+      changes: { year: before?.year, totalReceived: before?.totalReceived },
+    });
 
     sendSuccess(res, null, 'Payment record deleted');
   } catch (error: any) {
@@ -316,15 +371,18 @@ export const voidPaymentMonth = async (req: AuthRequest, res: Response): Promise
       return;
     }
 
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'void',
-        entity: 'payment',
-        entityId: paymentId,
-        changes: { month, voidedAmount: result.voidedAmount, reason: reason || '' },
-      });
-    }
+    await logAudit({
+      admin: req.admin?.id,
+      action: 'void',
+      entity: 'payment',
+      entityId: paymentId,
+      plot: String((result.payment as any)?.plot || ''),
+      summary:
+        `Voided ${monthLabel(month, (result.payment as any)?.year)} — ${money(result.voidedAmount)} taken off the record` +
+        (reason ? `. Reason: ${reason}` : ''),
+      diffs: [{ field: `payments.${String(month).toLowerCase()}`, from: result.voidedAmount, to: 0 }],
+      changes: { month, voidedAmount: result.voidedAmount, reason: reason || '' },
+    });
 
     sendSuccess(res, result.payment, `${month} voided (PKR ${result.voidedAmount})`);
   } catch (error: any) {
@@ -355,18 +413,51 @@ export const restorePaymentMonth = async (req: AuthRequest, res: Response): Prom
       return;
     }
 
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'restore',
-        entity: 'payment',
-        entityId: paymentId,
-        changes: { month, restoredAmount: result.restoredAmount },
-      });
-    }
+    await logAudit({
+      admin: req.admin?.id,
+      action: 'restore',
+      entity: 'payment',
+      entityId: paymentId,
+      plot: String((result.payment as any)?.plot || ''),
+      summary: `Restored ${monthLabel(month, (result.payment as any)?.year)} — ${money(result.restoredAmount)} put back on the record`,
+      diffs: [{ field: `payments.${String(month).toLowerCase()}`, from: 0, to: result.restoredAmount }],
+      changes: { month, restoredAmount: result.restoredAmount },
+    });
 
     sendSuccess(res, result.payment, `${month} restored (PKR ${result.restoredAmount})`);
   } catch (error: any) {
     sendError(res, 'Failed to restore payment', 500, error.message);
+  }
+};
+
+/**
+ * POST /payments/removal-check
+ * Body: { year, entries: [{ plotId, payments: { jan..dec } }] }
+ *
+ * Answers, before anything is written, which of the intended changes would take
+ * money off a month the cash book has already banked. Each one is returned with
+ * the detail the admin needs to recognise it — the owner, the month, what is
+ * recorded, what they are about to make it, the receipt number and when the
+ * money came in — so the confirmation they see names the actual payment rather
+ * than warning in the abstract.
+ */
+export const checkPaymentRemovals = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { year, entries } = req.body || {};
+    if (!year || !Array.isArray(entries)) {
+      sendError(res, 'year and entries[] are required', 400);
+      return;
+    }
+
+    const conflicts = await PaymentService.findRemovalConflicts(entries, parseInt(year));
+    sendSuccess(
+      res,
+      { conflicts },
+      conflicts.length === 0
+        ? 'No recorded payments are affected'
+        : `${conflicts.length} month(s) are covered by a recorded payment`,
+    );
+  } catch (error: any) {
+    sendError(res, 'Failed to check payments', 500, error.message);
   }
 };

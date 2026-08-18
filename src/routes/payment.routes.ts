@@ -9,6 +9,7 @@ import {
   deletePayment,
   voidPaymentMonth,
   restorePaymentMonth,
+  checkPaymentRemovals,
 } from '../controllers/payment.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { adminOnly } from '../middleware/adminOnly.middleware';
@@ -19,6 +20,8 @@ router.get('/', getPaymentByPlotYear);
 router.get('/plot/:plotId', getPaymentsByPlot);
 router.put('/:paymentId', authMiddleware, adminOnly, updatePayment);
 router.delete('/:paymentId', authMiddleware, adminOnly, deletePayment);
+// Read-only pre-flight: what a save would contradict, before it is written.
+router.post('/removal-check', authMiddleware, adminOnly, checkPaymentRemovals);
 router.post('/bulk', authMiddleware, adminOnly, bulkUpdatePayments);
 router.post('/bulk-all', authMiddleware, adminOnly, bulkUpdateAllMonths);
 router.post('/:paymentId/void', authMiddleware, adminOnly, voidPaymentMonth);

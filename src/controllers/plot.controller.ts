@@ -2,7 +2,8 @@ import { Request, Response } from 'express';
 import { PlotService } from '../services/plot.service';
 import { createPlotSchema, updatePlotSchema } from '../validations/plot.validation';
 import { sendSuccess, sendError, sendPaginated } from '../utils/responseHelper';
-import AuditLog from '../models/AuditLog';
+import Plot from '../models/Plot';
+import { logAudit, diffFields } from '../utils/auditTrail';
 import { AuthRequest } from '../middleware/auth.middleware';
 
 export const getPlots = async (req: Request, res: Response): Promise<void> => {
@@ -67,16 +68,18 @@ export const createPlot = async (req: AuthRequest, res: Response): Promise<void>
 
     const plot = await PlotService.create(validation.data);
 
-    // Audit log
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'create',
-        entity: 'plot',
-        entityId: plot._id.toString(),
-        changes: validation.data,
-      });
-    }
+    await logAudit({
+      admin: req.admin?.id,
+      action: 'create',
+      entity: 'plot',
+      entityId: plot._id.toString(),
+      plot: plot._id.toString(),
+      summary:
+        `Added plot ${plot.plotBlock}` +
+        (plot.ownerName ? ` for ${plot.ownerName}` : ' with no owner recorded'),
+      diffs: [],
+      changes: validation.data,
+    });
 
     sendSuccess(res, plot, 'Plot created', 201);
   } catch (error: any) {
@@ -97,21 +100,33 @@ export const updatePlot = async (req: AuthRequest, res: Response): Promise<void>
       return;
     }
 
+    // Read first, so the entry can show each field's before and after rather
+    // than only the values that were sent.
+    const before: any = await Plot.findById(plotId).lean();
     const plot = await PlotService.update(plotId, validation.data);
     if (!plot) {
       sendError(res, 'Plot not found', 404);
       return;
     }
 
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'update',
-        entity: 'plot',
-        entityId: plotId,
-        changes: validation.data,
-      });
-    }
+    const diffs = diffFields(before || {}, plot as any, [
+      'plotNumber', 'block', 'phase', 'plotBlock', 'ownerName', 'fatherName',
+      'contactNumber', 'cnic', 'address', 'plotSize', 'allotmentStatus',
+      'possessionStatus', 'monthlyChargeOverride', 'note', 'isActive',
+    ]);
+    await logAudit({
+      admin: req.admin?.id,
+      action: 'update',
+      entity: 'plot',
+      entityId: plotId,
+      plot: plotId,
+      summary: diffs.length
+        ? `Edited plot ${plot.plotBlock}: ` +
+          diffs.map((d) => `${d.field} "${d.from ?? '—'}" → "${d.to ?? '—'}"`).join(', ')
+        : `Saved plot ${plot.plotBlock} with nothing changed`,
+      diffs,
+      changes: validation.data,
+    });
 
     sendSuccess(res, plot, 'Plot updated');
   } catch (error: any) {
@@ -129,15 +144,16 @@ export const deletePlot = async (req: AuthRequest, res: Response): Promise<void>
       return;
     }
 
-    if (req.admin) {
-      await AuditLog.create({
-        admin: req.admin.id,
-        action: 'delete',
-        entity: 'plot',
-        entityId: plotId,
-        changes: { isActive: false },
-      });
-    }
+    await logAudit({
+      admin: req.admin?.id,
+      action: 'delete',
+      entity: 'plot',
+      entityId: plotId,
+      plot: plotId,
+      summary: `Removed plot ${plot.plotBlock} from the active list. Its records are kept.`,
+      diffs: [{ field: 'isActive', from: true, to: false }],
+      changes: { isActive: false },
+    });
 
     sendSuccess(res, plot, 'Plot deleted (soft)');
   } catch (error: any) {

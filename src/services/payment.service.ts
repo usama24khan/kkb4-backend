@@ -1,7 +1,8 @@
 import Payment, { IPayment } from '../models/Payment';
 import Plot from '../models/Plot';
 import Collection from '../models/Collection';
-import { MONTHS, getMcRateForYear } from '../config/constants';
+import Receipt from '../models/Receipt';
+import { MONTHS, getMcRateForYear, getChargeForYear } from '../config/constants';
 import { Types } from 'mongoose';
 
 /**
@@ -15,7 +16,9 @@ function recalcTotals(payment: IPayment): void {
     if (val !== null && val !== undefined && !isNaN(val)) total += val;
   }
   payment.totalReceived = total;
-  payment.totalDue = payment.mcRate * 12;
+  // The charge rose in the middle of 2022, so a year is not twelve times one
+  // rate. The save hook derives totalDue and remaining from the schedule.
+  payment.totalDue = getChargeForYear(payment.year);
   payment.remaining = payment.totalDue - payment.totalReceived;
 }
 
@@ -78,6 +81,35 @@ async function ledgerBackedMonthsFor(plotId: string, year: number): Promise<Set<
     }
   }
   return backed;
+}
+
+/**
+ * One intended change that would take money off a banked month, with enough
+ * detail for the admin to recognise the payment they are about to contradict.
+ */
+export interface RemovalConflict {
+  plotId: string;
+  plotLabel: string;
+  ownerName: string;
+  year: number;
+  month: string;
+  /** What the owner's record currently shows for this month. */
+  currentAmount: number;
+  /** What the save would change it to. */
+  newAmount: number;
+  /** How much of this month the cash book has banked. */
+  bankedAmount: number;
+  receiptNumbers: string[];
+  receivedDate: Date | null;
+  /** The month the money was counted as income, e.g. "aug 2026". */
+  countedIn: string | null;
+}
+
+/** What a bulk save actually changed for one plot, for the audit trail. */
+export interface MonthMovement {
+  plotId: string;
+  year: number;
+  months: Array<{ month: string; from: number; to: number }>;
 }
 
 /** Raised when a caller tries to undo a month the cash book has banked. */
@@ -297,6 +329,7 @@ export class PaymentService {
     const results = [];
     const deltas: Array<{ plotId: string; allocations: Array<{ year: number; month: string; amount: number }> }> = [];
     const blocked: BlockedMonth[] = [];
+    const movements: MonthMovement[] = [];
     const defaultRate = getMcRateForYear(year);
     const ledgerBacked = await loadLedgerBackedMonths(entries.map((e) => e.plotId));
 
@@ -327,6 +360,9 @@ export class PaymentService {
       if (increase > 0) {
         deltas.push({ plotId: entry.plotId, allocations: [{ year, month, amount: increase }] });
       }
+      if (increase !== 0) {
+        movements.push({ plotId: entry.plotId, year, months: [{ month, from: before, to: next }] });
+      }
 
       (payment.payments as any)[month] = entry.amount;
 
@@ -338,14 +374,13 @@ export class PaymentService {
         }
       }
       payment.totalReceived = total;
-      payment.totalDue = payment.mcRate * 12;
-      payment.remaining = payment.totalDue - payment.totalReceived;
+      // totalDue and remaining are derived on save from the rate schedule.
 
       const saved = await payment.save();
       results.push(saved);
     }
 
-    return { results, deltas, blocked };
+    return { results, deltas, blocked, movements };
   }
 
   /**
@@ -364,6 +399,7 @@ export class PaymentService {
     const results = [];
     const deltas: Array<{ plotId: string; allocations: Array<{ year: number; month: string; amount: number }> }> = [];
     const blocked: BlockedMonth[] = [];
+    const movements: MonthMovement[] = [];
     const defaultRate = getMcRateForYear(year);
     const ledgerBacked = await loadLedgerBackedMonths(entries.map((e) => e.plotId));
 
@@ -379,6 +415,7 @@ export class PaymentService {
       }
 
       const increases: Array<{ year: number; month: string; amount: number }> = [];
+      const moved: Array<{ month: string; from: number; to: number }> = [];
       for (const m of MONTHS) {
         const v = (entry.payments || {})[m];
         if (v === undefined) continue;
@@ -394,15 +431,17 @@ export class PaymentService {
         }
 
         if (increase > 0) increases.push({ year, month: m, amount: increase });
+        if (increase !== 0) moved.push({ month: m, from: before, to: next || 0 });
         (payment.payments as any)[m] = next;
       }
       if (increases.length) deltas.push({ plotId: entry.plotId, allocations: increases });
+      if (moved.length) movements.push({ plotId: entry.plotId, year, months: moved });
 
       recalcTotals(payment);
       results.push(await payment.save());
     }
 
-    return { results, deltas, blocked };
+    return { results, deltas, blocked, movements };
   }
 
   static async getPaymentsByBlock(block: string, year: number) {
@@ -429,5 +468,103 @@ export class PaymentService {
     }).populate('plot').lean();
 
     return payments;
+  }
+
+  /**
+   * Which of the intended month changes would contradict a recorded payment.
+   *
+   * Read-only, and deliberately run before the save: the admin gets one dialog
+   * naming every affected month, receipt and amount, instead of discovering
+   * after the fact that part of what they typed was refused.
+   */
+  static async findRemovalConflicts(
+    entries: Array<{ plotId: string; payments?: Record<string, number | null>; amount?: number; month?: string }>,
+    year: number,
+  ): Promise<RemovalConflict[]> {
+    const plotIds = entries.map((e) => e.plotId);
+    if (plotIds.length === 0) return [];
+
+    const live = await Collection.find({
+      plot: { $in: plotIds },
+      isVoided: false,
+      countInCashBook: true,
+    })
+      .select('plot allocations receiptRef receivedDate bookYear bookMonth')
+      .lean();
+
+    // What the cash book banked per plot-year-month, and which payment did it.
+    const banked = new Map<
+      string,
+      { amount: number; receipts: Set<string>; receivedDate: Date | null; countedIn: string | null }
+    >();
+    const receiptIds = live.map((c: any) => c.receiptRef).filter(Boolean);
+    const receipts = receiptIds.length
+      ? await Receipt.find({ _id: { $in: receiptIds } }).select('receiptNumber').lean()
+      : [];
+    const receiptNumberById = new Map(receipts.map((r: any) => [String(r._id), r.receiptNumber]));
+
+    for (const entry of live as any[]) {
+      for (const alloc of entry.allocations || []) {
+        if (Number(alloc.year) !== Number(year)) continue;
+        const key = `${entry.plot}:${String(alloc.month).toLowerCase()}`;
+        const slot =
+          banked.get(key) || { amount: 0, receipts: new Set<string>(), receivedDate: null, countedIn: null };
+        slot.amount += Number(alloc.amount) || 0;
+        const number = entry.receiptRef ? receiptNumberById.get(String(entry.receiptRef)) : undefined;
+        if (number) slot.receipts.add(number);
+        // The most recent payment describes the month best.
+        if (!slot.receivedDate || new Date(entry.receivedDate) > new Date(slot.receivedDate)) {
+          slot.receivedDate = entry.receivedDate;
+          slot.countedIn = `${MONTHS[(entry.bookMonth || 1) - 1]} ${entry.bookYear}`;
+        }
+        banked.set(key, slot);
+      }
+    }
+    if (banked.size === 0) return [];
+
+    const records = await Payment.find({ plot: { $in: plotIds }, year }).select('plot payments').lean();
+    const recordByPlot = new Map(records.map((r: any) => [String(r.plot), r]));
+    const plots = await Plot.find({ _id: { $in: plotIds } }).select('plotBlock ownerName').lean();
+    const plotById = new Map(plots.map((p: any) => [String(p._id), p]));
+
+    const conflicts: RemovalConflict[] = [];
+    for (const entry of entries) {
+      // Both grid shapes: a full month map, or a single month and amount.
+      const intended: Record<string, number | null> = entry.payments
+        ? entry.payments
+        : entry.month
+          ? { [entry.month]: entry.amount ?? 0 }
+          : {};
+
+      for (const [rawMonth, rawValue] of Object.entries(intended)) {
+        const month = String(rawMonth).toLowerCase();
+        const slot = banked.get(`${entry.plotId}:${month}`);
+        if (!slot) continue;
+
+        const record: any = recordByPlot.get(String(entry.plotId));
+        const currentAmount = Number(record?.payments?.[month]) || 0;
+        const newAmount = Number(rawValue) || 0;
+        if (newAmount >= currentAmount) continue;
+
+        const plot: any = plotById.get(String(entry.plotId));
+        conflicts.push({
+          plotId: entry.plotId,
+          plotLabel: plot?.plotBlock || entry.plotId,
+          ownerName: plot?.ownerName || '',
+          year,
+          month,
+          currentAmount,
+          newAmount,
+          bankedAmount: slot.amount,
+          receiptNumbers: [...slot.receipts],
+          receivedDate: slot.receivedDate,
+          countedIn: slot.countedIn,
+        });
+      }
+    }
+
+    return conflicts.sort(
+      (a, b) => a.plotLabel.localeCompare(b.plotLabel) || (MONTHS as readonly string[]).indexOf(a.month) - (MONTHS as readonly string[]).indexOf(b.month),
+    );
   }
 }
