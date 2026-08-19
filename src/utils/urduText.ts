@@ -28,16 +28,47 @@ export function hasNonLatin(text: string): boolean {
  * correct side of the word it belongs to, so moving it by hand puts it back on
  * the wrong side — "ای میل:" came out as "ای: میل".
  *
+ * Runs of Latin words keep their own order. An owner called "Muhammad Ahmed
+ * Khan" is not three Urdu words: reversing them turned the name into "Khan
+ * Ahmed Muhammad". So the whole line reverses, then each Latin run is put back
+ * the right way round — which is what a reader expects of a Latin name or an
+ * address inside an Urdu sentence.
+ *
  * A comma-separated list needs both passes: the items reverse, and so do the
  * words inside each item, or a multi-word item reads backwards ("پلاٹ نمبر"
  * rendered as "نمبر پلاٹ").
  */
-export function rtlWords(text: string): string {
-  const words = (t: string) => t.split(" ").reverse().join(" ");
-  if (text.includes("، ")) {
-    return text.split("، ").reverse().map(words).join("، ");
+function reverseWordsKeepingLatinRuns(text: string): string {
+  const tokens = text.split(" ");
+  const reversed = tokens.reverse();
+
+  // A token counts as Latin only if it has no Urdu letters at all; "صاحب،" is
+  // Urdu, "0300-1234567" and "Phase" are not.
+  const isLatin = (t: string) => t.length > 0 && !hasNonLatin(t);
+
+  let i = 0;
+  while (i < reversed.length) {
+    if (!isLatin(reversed[i])) { i += 1; continue; }
+    let j = i;
+    while (j + 1 < reversed.length && isLatin(reversed[j + 1])) j += 1;
+    if (j > i) {
+      const run = reversed.slice(i, j + 1).reverse();
+      reversed.splice(i, run.length, ...run);
+    }
+    i = j + 1;
   }
-  return words(text);
+  return reversed.join(" ");
+}
+
+export function rtlWords(text: string): string {
+  if (text.includes("، ")) {
+    return text
+      .split("، ")
+      .reverse()
+      .map(reverseWordsKeepingLatinRuns)
+      .join("، ");
+  }
+  return reverseWordsKeepingLatinRuns(text || "");
 }
 
 /**
@@ -65,4 +96,40 @@ export function urduLine(
   lineBreak = true,
 ): void {
   doc.text(forPdf(str), x, y, { width, align, lineBreak });
+}
+
+/**
+ * Break Urdu prose into lines that fit a width, in logical order.
+ *
+ * Letting PDFKit wrap the text itself is not an option: the string handed to it
+ * has already had its words reversed, so PDFKit would break it at what is
+ * visually the start of the sentence and the lines would come out in the wrong
+ * order. Wrapping here, before the reversal, keeps each line a self-contained
+ * unit that is then drawn right to left.
+ *
+ * The caller must have selected the font and size already — the measurement
+ * depends on both.
+ */
+export function wrapUrdu(
+  doc: PDFKit.PDFDocument,
+  text: string,
+  width: number,
+): string[] {
+  const words = (text || "").split(" ").filter(Boolean);
+  if (words.length === 0) return [];
+
+  const lines: string[] = [];
+  let current = "";
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    // Measured on the drawn form, which is what has to fit.
+    if (current && doc.widthOfString(forPdf(candidate)) > width) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
 }
