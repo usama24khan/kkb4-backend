@@ -34,9 +34,11 @@ export function hasNonLatin(text: string): boolean {
  * the right way round — which is what a reader expects of a Latin name or an
  * address inside an Urdu sentence.
  *
- * A comma-separated list needs both passes: the items reverse, and so do the
- * words inside each item, or a multi-word item reads backwards ("پلاٹ نمبر"
- * rendered as "نمبر پلاٹ").
+ * A comma-separated list needs no special case. Reversing every word already
+ * puts both the items and their words in reading order, and it keeps each comma
+ * attached to the word it follows. Treating the list as items instead moved the
+ * comma onto the next item — a sentence came out reading "…روپے سال، 2024" where
+ * the comma belongs after "روپے".
  */
 function reverseWordsKeepingLatinRuns(text: string): string {
   const tokens = text.split(" ");
@@ -61,13 +63,6 @@ function reverseWordsKeepingLatinRuns(text: string): string {
 }
 
 export function rtlWords(text: string): string {
-  if (text.includes("، ")) {
-    return text
-      .split("، ")
-      .reverse()
-      .map(reverseWordsKeepingLatinRuns)
-      .join("، ");
-  }
   return reverseWordsKeepingLatinRuns(text || "");
 }
 
