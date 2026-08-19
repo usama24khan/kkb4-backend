@@ -376,8 +376,9 @@ function renderNotice(
   if (isUr) {
     doc.font(URDU).fontSize(24).fillColor(UR_DARK);
     line(doc, "نوٹس", LEFT_X, y, CONTENT_W, "center");
-    // Nastaliq drops far below its origin; less than this and the rule crosses it.
-    y += mm(18);
+    // A 24pt Nastaliq line box is about 21mm tall, so anything less than this
+    // puts the rule inside the word rather than under it.
+    y += mm(23);
   } else {
     doc.font(LATIN_B).fontSize(26).fillColor(UR_DARK);
     doc.text("NOTICE", LEFT_X, y, { width: CONTENT_W, align: "center" });
@@ -407,7 +408,13 @@ function renderNotice(
   rows.push({ label: isUr ? "حیثیت" : "Status", value: statusValue, valueIsUrdu: isUr });
 
   const LABEL_W = mm(50);
-  const ROW_H = mm(9);
+  // Nastaliq's line box at 10.5pt is 9.26mm — taller than a 9mm row, which is why
+  // Urdu text was crossing the rules. Measured: an 11mm row with the text 0.5mm
+  // down sits centred, with clearance above and below.
+  const ROW_H = isUr ? mm(11) : mm(9);
+  const UR_TEXT_DY = mm(0.5);
+  // Helvetica at 11pt is ~3.9mm tall; centre it in whichever row height is used.
+  const LATIN_TEXT_DY = isUr ? mm(3.6) : mm(2.8);
   const tableTop = y;
   // Mirrored for Urdu: the label column sits on the right, values to its left.
   const labelX = isUr ? RIGHT_X - LABEL_W : LEFT_X;
@@ -417,7 +424,7 @@ function renderNotice(
   for (const row of rows) {
     if (isUr) {
       doc.font(URDU).fontSize(10.5).fillColor(UR_SOFT_DARK);
-      line(doc, row.label, labelX + mm(3), y + mm(1), LABEL_W - mm(6), "right");
+      line(doc, row.label, labelX + mm(3), y + UR_TEXT_DY, LABEL_W - mm(6), "right");
     } else {
       doc.font(LATIN_B).fontSize(10).fillColor(UR_SOFT_DARK);
       doc.text(row.label, labelX + mm(3), y + mm(3), {
@@ -427,10 +434,10 @@ function renderNotice(
 
     if (row.valueIsUrdu) {
       doc.font(URDU).fontSize(11).fillColor(UR_DARK);
-      line(doc, row.value, valueX + mm(3), y + mm(1), valueW - mm(6), "right");
+      line(doc, row.value, valueX + mm(3), y + UR_TEXT_DY, valueW - mm(6), "right");
     } else {
       doc.font(LATIN).fontSize(11).fillColor(UR_DARK);
-      doc.text(row.value, valueX + mm(3), y + mm(2.8), {
+      doc.text(row.value, valueX + mm(3), y + LATIN_TEXT_DY, {
         width: valueW - mm(6), align: isUr ? "right" : "left", lineBreak: false,
       });
     }
