@@ -40,6 +40,7 @@ import {
   registerUrduFont,
   URDU_FONT_FAMILY,
 } from "./urduFont";
+import { forPdf, hasNonLatin } from "./urduText";
 
 /**
  * Return the canonical phase for a plot using the current BLOCK_PHASE_MAP.
@@ -437,30 +438,6 @@ function urduUnpaidMonths(months: string[]): string {
   return months.map((m) => URDU_MONTH[m] || m).join("، ");
 }
 
-function hasNonLatin(text: string): boolean {
-  return Array.from(text || "").some((c) => c.charCodeAt(0) > 127);
-}
-
-/**
- * Reverse word order for RTL rendering in PDFKit.
- *
- * PDFKit renders glyphs left-to-right regardless of script.  Fontkit shapes
- * each Nastaliq word correctly, but word ORDER stays in Unicode/logical order
- * (first word on the left).  Pre-reversing the word order means PDFKit's LTR
- * placement puts the first logical word on the RIGHT — exactly what an Urdu
- * reader expects.
- *
- * Two separator modes:
- *  - Urdu comma list ("جون، جولائی، ...") → split on "، ", reverse items, rejoin
- *  - Space-separated sentence → split on space, reverse words, rejoin
- */
-function rtlWords(text: string): string {
-  if (text.includes("، ")) {
-    return text.split("، ").reverse().join("، ");
-  }
-  return text.split(" ").reverse().join(" ");
-}
-
 function line(
   doc: PDFKit.PDFDocument,
   str: string,
@@ -469,10 +446,9 @@ function line(
   width: number,
   align: "left" | "right" | "center" = "left",
 ): void {
-  // Urdu/Arabic strings: pre-reverse word order so LTR rendering is visually RTL.
-  // Latin-only strings (numbers, dates, email) are left unchanged.
-  const rendered = hasNonLatin(str) ? rtlWords(str) : str;
-  doc.text(rendered, x, y, { width, align });
+  // Urdu strings are drawn right to left; Latin-only ones (numbers, dates,
+  // e-mail) are left as they are. See utils/urduText.ts.
+  doc.text(forPdf(str), x, y, { width, align });
 }
 
 function renderUrdu(
@@ -495,17 +471,20 @@ function renderUrdu(
   const RIGHT_X = mm(190);
   const CONTENT_W = mm(170);
 
-  const LH_URDU = mm(8);
+  // Nastaliq rises high above its baseline and swoops far below it, so lines set
+  // at a Latin face's rhythm touch each other. These values are what the page
+  // needs to read cleanly rather than the minimum that fits.
+  const LH_URDU = mm(8.5);
   const LABEL_VAL_GAP = mm(3);
 
-  let y = mm(18);
+  let y = mm(20);
 
   // ── Masthead ──────────────────────────────────────────────────────────────
 
   doc.font(URDU).fontSize(18).fillColor(UR_DARK);
   const societyName = "کے کے بی فیز 4 ہاؤسنگ سوسائٹی";
   line(doc, societyName, 0, y, PAGE_W, "center");
-  y += mm(10);
+  y += mm(15);
 
   const phone = "03226576614";
   const emailLabel = "ای میل:";
@@ -515,16 +494,17 @@ function renderUrdu(
   const emailValueW = doc.widthOfString(emailValue);
   doc.text(emailValue, RIGHT_X - emailValueW, y, { lineBreak: false });
   doc.font(URDU).fontSize(9).fillColor(UR_MUTED);
-  const emailLabelW = doc.widthOfString(emailLabel);
-  doc.text(emailLabel, RIGHT_X - emailValueW - mm(2) - emailLabelW, y, { lineBreak: false });
+  const emailLabelOut = forPdf(emailLabel);
+  const emailLabelW = doc.widthOfString(emailLabelOut);
+  doc.text(emailLabelOut, RIGHT_X - emailValueW - mm(2) - emailLabelW, y, { lineBreak: false });
 
   doc.font(LATIN).fontSize(9).fillColor(UR_MUTED);
   doc.text(phone, LEFT_X, y, { lineBreak: false });
   const phoneW = doc.widthOfString(phone);
   doc.font(URDU).fontSize(9).fillColor(UR_MUTED);
-  doc.text("فون:", LEFT_X + phoneW + mm(2), y, { lineBreak: false });
+  doc.text(forPdf("فون:"), LEFT_X + phoneW + mm(2), y, { lineBreak: false });
 
-  y += mm(9);
+  y += mm(10);
 
   doc.strokeColor(UR_LINE_GREY).lineWidth(mm(0.3));
   doc.moveTo(LEFT_X, y).lineTo(RIGHT_X, y).stroke();
@@ -535,7 +515,7 @@ function renderUrdu(
   const titleText = "واجب الادا فیس نوٹس";
   doc.font(URDU).fontSize(16).fillColor(UR_DARK);
   line(doc, titleText, 0, y, PAGE_W, "center");
-  y += mm(11);
+  y += mm(10);
 
   // ── Meta rows ─────────────────────────────────────────────────────────────
 
@@ -617,8 +597,8 @@ function renderUrdu(
   ];
   const colW = [colAmount, colRate, colMonths, colYear];
 
-  const HEADER_H = mm(10);
-  const HEADER_PAD = mm(2.2);
+  const HEADER_H = mm(11);
+  const HEADER_PAD = mm(2.6);
 
   doc.save();
   doc.rect(LEFT_X, y, CONTENT_W, HEADER_H).fill(UR_HEADER_BG);
@@ -643,8 +623,10 @@ function renderUrdu(
     );
     y += mm(16);
   } else {
-    const ROW_H = mm(10);
-    const ROW_PAD = mm(1.8);
+    // A row holds a centred Nastaliq month list, which is the tallest thing on
+    // the page after the masthead; at mm(10) it crossed the rule below it.
+    const ROW_H = mm(10.5);
+    const ROW_PAD = mm(2.2);
 
     for (let idx = 0; idx < breakdowns.length; idx++) {
       const row = breakdowns[idx];
@@ -685,12 +667,11 @@ function renderUrdu(
   doc.font(URDU).fontSize(12).fillColor(UR_DARK);
   line(doc, "کل واجب الادا رقم", RIGHT_X - mm(60), y, mm(60), "right");
 
-  doc.font(LATIN_B).fontSize(12).fillColor(UR_DARK);
-  const digitsStr = `${grandTotal.toLocaleString("en-US")}`;
-  const digitsW = doc.widthOfString(digitsStr) + mm(2);
-  line(doc, digitsStr, LEFT_X, y, digitsW, "left");
+  // Drawn as one Urdu-font string rather than a Latin run followed by a Nastaliq
+  // one: the two faces put their baselines in different places, so at the same
+  // `y` the rupee word appeared a line below the figure, as if it had wrapped.
   doc.font(URDU).fontSize(12).fillColor(UR_DARK);
-  line(doc, "روپے", LEFT_X + digitsW, y, mm(20), "left");
+  line(doc, `${grandTotal.toLocaleString("en-US")}  روپے`, LEFT_X, y, mm(50), "left");
   y += LH_URDU + mm(3);
 
   // ── Deadline ──────────────────────────────────────────────────────────────
@@ -708,7 +689,7 @@ function renderUrdu(
     );
     y += LH_URDU + mm(2);
   }
-  y += mm(3);
+  y += mm(4);
 
   // ── Payment instructions ──────────────────────────────────────────────────
 
@@ -721,17 +702,22 @@ function renderUrdu(
     doc, "براہ کرم اپنی مینٹیننس فیس کے کے بی 4 سوسائٹی آفس میں جمع کروائیں۔",
     LEFT_X, y, CONTENT_W, "right",
   );
-  y += mm(8);
+  y += mm(9);
 
   // ── Signature block ───────────────────────────────────────────────────────
 
   const sigW = mm(60);
   const sigX = RIGHT_X - sigW;
-  let sigY = Math.max(y + mm(10), PAGE_H - MARGIN_B - mm(26));
+  const sigImgW = mm(18);
+  const sigImgH = sigImgW * SIGNATURE_RATIO;
+  // The image sits above the line, so the line must clear the last line of text
+  // by the image's height plus a margin — otherwise the signature is drawn over
+  // the payment instructions.
+  let sigY = Math.max(y + sigImgH + mm(5), PAGE_H - MARGIN_B - mm(26));
 
   if (fs.existsSync(SIGNATURE_PATH)) {
-    const imgW = mm(24);
-    const imgH = imgW * SIGNATURE_RATIO;
+    const imgW = sigImgW;
+    const imgH = sigImgH;
     try {
       doc.image(SIGNATURE_PATH, sigX + (sigW - imgW) / 2, sigY - imgH - mm(1), { width: imgW });
     } catch {
@@ -744,6 +730,15 @@ function renderUrdu(
 
   doc.font(URDU).fontSize(10).fillColor(UR_DARK);
   line(doc, "سیکریٹری، چیئرمین", sigX, sigY + mm(4), sigW, "right");
+
+  if (process.env.NOTICE_LAYOUT_DEBUG === "1") {
+    const asMm = (v: number) => (v / mm(1)).toFixed(1);
+    console.log(
+      `[notice layout] content ends ${asMm(y)}mm · signature line ${asMm(sigY)}mm` +
+        ` · footer text ends ${asMm(sigY + mm(9))}mm · page 297mm` +
+        ` · gap content→signature ${asMm(sigY - y)}mm`,
+    );
+  }
 }
 
 // ─── Urdu PDF generator ─────────────────────────────────────────────────────

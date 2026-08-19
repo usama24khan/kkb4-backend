@@ -24,6 +24,7 @@ import os from "os";
 import { IReceipt } from "../models/Receipt";
 import { uploadToCloudinary } from "../lib/uploadToCloudinary";
 import { registerUrduFont, URDU_FONT_FAMILY } from "./urduFont";
+import { forPdf, hasNonLatin as hasUrdu } from "./urduText";
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -119,16 +120,32 @@ export function formatCoveredMonths(
   if (sorted.length === 1) return longName(sorted[0]);
 
   const count = sorted.length;
-  const suffix = lang === "ur" ? `(${count} ماہ)` : `(${count} months)`;
-
+  // No brackets in the Urdu form. The renderer reverses word order to lay Urdu
+  // out right to left, which leaves a "(" facing the wrong way and its partner
+  // stranded at the other end of the line; a separator carries the same meaning
+  // and cannot come apart.
   const contiguous = sorted.every((m, i) => i === 0 || ord(m) === ord(sorted[i - 1]) + 1);
+
+  if (lang === "ur") {
+    // Count first, then the range. The bracketed English form has no good Urdu
+    // equivalent here: brackets mirror under right-to-left layout and a middle
+    // dot next to a number reads as another digit ("10 ·" looked like "100").
+    // "تا" is "to", which is how the range would be said aloud.
+    const head = `${count} ماہ:`;
+    if (contiguous) return `${head} ${longName(sorted[0])} تا ${longName(sorted[count - 1])}`;
+    const list = sorted.slice(0, 6).map(shortName).join(", ");
+    const rest = count - Math.min(6, count);
+    return rest > 0 ? `${head} ${list} + ${rest} مزید` : `${head} ${list}`;
+  }
+
+  const suffix = `(${count} months)`;
   if (contiguous) {
     return `${longName(sorted[0])} - ${longName(sorted[count - 1])} ${suffix}`;
   }
 
   const shown = sorted.slice(0, 6).map(shortName).join(", ");
   const rest = count - Math.min(6, count);
-  const more = rest > 0 ? (lang === "ur" ? ` + ${rest} مزید` : ` +${rest} more`) : "";
+  const more = rest > 0 ? ` +${rest} more` : "";
   return `${shown}${more} ${suffix}`;
 }
 
@@ -378,10 +395,6 @@ const UR_SUBTLE = "#94a3b8"; // rgb(148, 163, 184)
 const UR_LINE_GREY = "#cbd5e1"; // rgb(203, 213, 225)
 const UR_BAND_BG = "#f8fafc"; // rgb(248, 250, 252)
 
-function hasNonLatin(text: string): boolean {
-  return Array.from(text || "").some((c) => c.charCodeAt(0) > 127);
-}
-
 /**
  * Render the Urdu receipt slip using PDFKit.
  *
@@ -400,7 +413,7 @@ function renderUrduSlip(
   const PAGE_W = mm(148);
   const MARGIN = mm(14);
   const PAD = mm(9);
-  const CARD_TOP = mm(18);
+  const CARD_TOP = mm(13);
 
   const boxX = MARGIN;
   const boxW = PAGE_W - 2 * MARGIN;
@@ -413,20 +426,24 @@ function renderUrduSlip(
   // ── Header ──
   const society = p.societyName || "کے کے بی ہاؤسنگ سوسائٹی";
   doc.font(URDU).fontSize(15).fillColor(UR_DARK);
-  let sw = doc.widthOfString(society);
-  doc.text(society, (PAGE_W - sw) / 2, y, { lineBreak: false });
-  y += mm(10);
+  const societyOut = forPdf(society);
+  let sw = doc.widthOfString(societyOut);
+  doc.text(societyOut, (PAGE_W - sw) / 2, y, { lineBreak: false });
+  // Nastaliq at 15pt swings well below its baseline; mm(10) let the subtitle's
+  // ascenders cross the title's descenders.
+  y += mm(13);
 
   const subtitle = "ادائیگی کی رسید";
   doc.font(URDU).fontSize(10).fillColor(UR_MUTED_C);
-  sw = doc.widthOfString(subtitle);
-  doc.text(subtitle, (PAGE_W - sw) / 2, y, { lineBreak: false });
-  y += mm(10);
+  const subtitleOut = forPdf(subtitle);
+  sw = doc.widthOfString(subtitleOut);
+  doc.text(subtitleOut, (PAGE_W - sw) / 2, y, { lineBreak: false });
+  y += mm(11);
 
   // Horizontal divider
   doc.strokeColor(UR_LINE_GREY).lineWidth(mm(0.3));
   doc.moveTo(innerL, y).lineTo(innerR, y).stroke();
-  y += mm(5);
+  y += mm(6);
 
   // ── Two-column meta rows ──
   // Noto Nastaliq glyphs extend far above the baseline — give each row
@@ -438,8 +455,8 @@ function renderUrduSlip(
   // rowH must cover: label (8pt Nastaliq ≈ 13pt visual) + gap + value (11pt Nastaliq ≈ 17pt visual)
   const LABEL_FS = 7;
   const VALUE_FS = 11;
-  const LABEL_H = mm(9);  // visual height of Nastaliq label line
-  const rowH = mm(21);    // total height per field row
+  const LABEL_H = mm(9.5); // visual height of Nastaliq label line
+  const rowH = mm(22);     // total height per field row
 
   const urduField = (
     labelUr: string,
@@ -449,9 +466,9 @@ function renderUrduSlip(
     w: number,
     valueUrdu?: boolean | null,
   ): void => {
-    // Label: small muted Urdu text, right-aligned
+    // Label: small muted Urdu text, right-aligned, words in reading order.
     doc.font(URDU).fontSize(LABEL_FS).fillColor(UR_SUBTLE);
-    doc.text(labelUr, colX, cy, { width: w, align: "right", lineBreak: false });
+    doc.text(forPdf(labelUr), colX, cy, { width: w, align: "right", lineBreak: false });
 
     // Value: rendered below the label with enough clearance for Nastaliq ascenders
     const valY = cy + LABEL_H;
@@ -460,13 +477,13 @@ function renderUrduSlip(
     } else if (valueUrdu === false) {
       doc.font(LATIN_B).fontSize(VALUE_FS).fillColor(UR_DARK);
     } else {
-      if (hasNonLatin(value || "")) {
+      if (hasUrdu(value || "")) {
         doc.font(URDU).fontSize(VALUE_FS).fillColor(UR_DARK);
       } else {
         doc.font(LATIN_B).fontSize(VALUE_FS).fillColor(UR_DARK);
       }
     }
-    doc.text(value || "—", colX, valY, {
+    doc.text(forPdf(value || "—"), colX, valY, {
       width: w,
       align: "right",
       lineBreak: false,
@@ -505,13 +522,13 @@ function renderUrduSlip(
       y += rowH;
     }
   }
-  y += mm(4);
+  y += mm(3);
 
   // ── Amount band ──
   // Band is tall enough to hold: "موصول رقم" label (top) + amount line (middle).
   // Nastaliq at fontSize 14 needs ~18pt (≈6.5mm) of visual height, so bandH=26mm
   // gives comfortable padding above and below.
-  const bandH = mm(26);
+  const bandH = mm(23);
   doc.save();
   doc.lineWidth(mm(0.3));
   doc.rect(innerL, y, innerW, bandH).fillAndStroke(UR_BAND_BG, UR_LINE_GREY);
@@ -519,36 +536,37 @@ function renderUrduSlip(
 
   // "موصول رقم" label — small, top-right inside band
   doc.font(URDU).fontSize(7).fillColor(UR_MUTED_C);
-  doc.text("موصول رقم", innerL, y + mm(4), {
+  doc.text(forPdf("موصول رقم"), innerL, y + mm(4), {
     width: innerW - mm(4),
     align: "right",
     lineBreak: false,
   });
 
-  // Amount line — "X,XXX/- روپے" right-aligned, vertically centred in band
+  // Amount line — "X,XXX/- روپے", right-aligned inside the band.
+  //
+  // Drawn as one string in the Urdu font rather than two runs in two fonts:
+  // Helvetica and Nastaliq place their baselines very differently, so the same
+  // `y` put the rupee word visibly below the digits, as if it had wrapped.
   const amount = Math.round(p.amount || 0);
-  const digitsStr = `${amount.toLocaleString("en-US")}/- `;
+  // Two spaces: one closes up to almost nothing between a Latin figure and a
+  // Nastaliq word, leaving "4,000/-روپے" with no gap at all.
+  const amountStr = `${amount.toLocaleString("en-US")}/-  روپے`;
 
   doc.font(URDU).fontSize(14).fillColor(UR_DARK);
-  const rupeeW = doc.widthOfString("روپے");
-  doc.font(LATIN_B).fontSize(14).fillColor(UR_DARK);
-  const digitsW = doc.widthOfString(digitsStr);
-  const totalAmountW = rupeeW + digitsW;
-  const amountX = innerR - mm(4) - totalAmountW;
-  const amountY = y + mm(13);
+  doc.text(forPdf(amountStr), innerL, y + mm(11), {
+    width: innerW - mm(4),
+    align: "right",
+    lineBreak: false,
+  });
 
-  // Draw digits (Latin) first (leftmost), then Urdu word to the right
-  doc.font(LATIN_B).fontSize(14).fillColor(UR_DARK);
-  doc.text(digitsStr, amountX, amountY, { lineBreak: false });
-  doc.font(URDU).fontSize(14).fillColor(UR_DARK);
-  doc.text("روپے", amountX + digitsW, amountY, { lineBreak: false });
-
-  y += bandH + mm(5);
+  y += bandH + mm(4);
 
 
   // ── Signature ──
+  // On the right: this document reads right to left, and a signature block on
+  // the left is the clearest sign that a page was laid out for the wrong script.
   const sigW = mm(55);
-  const sigX = innerL;
+  const sigX = innerR - sigW;
   const sigTop = y;
 
   let lineY: number;
@@ -573,7 +591,7 @@ function renderUrduSlip(
 
   // "مجاز دستخط" (Authorized signatory)
   doc.font(URDU).fontSize(8).fillColor(UR_MUTED_C);
-  doc.text("مجاز دستخط", sigX, lineY + mm(2), {
+  doc.text(forPdf("مجاز دستخط"), sigX, lineY + mm(2), {
     width: sigW,
     align: "center",
     lineBreak: false,
@@ -581,7 +599,7 @@ function renderUrduSlip(
 
   // Society name
   doc.font(URDU).fontSize(8).fillColor(UR_DARK);
-  doc.text(society, sigX, lineY + mm(9), {
+  doc.text(forPdf(society), sigX, lineY + mm(9), {
     width: sigW,
     align: "center",
     lineBreak: false,
@@ -589,6 +607,12 @@ function renderUrduSlip(
 
   // ── Card border (drawn last, sized to the actual content) ──
   const cardBottom = lineY + mm(16);
+  if (process.env.RECEIPT_LAYOUT_DEBUG === "1") {
+    console.log(
+      `[receipt layout] card ${(CARD_TOP / mm(1)).toFixed(1)}mm → ${(cardBottom / mm(1)).toFixed(1)}mm` +
+        ` · page 210mm · slack ${(210 - cardBottom / mm(1)).toFixed(1)}mm`,
+    );
+  }
   doc.lineWidth(mm(0.4)).strokeColor(UR_LINE_GREY);
   doc
     .roundedRect(boxX, CARD_TOP, boxW, cardBottom - CARD_TOP, mm(2.5))
