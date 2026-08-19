@@ -1,0 +1,13 @@
+/**
+ * Society layout facts for the AI chat prompt.
+ *
+ * GENERATED FILE — do not edit by hand.
+ * Source: frontend-admin/constants/societyMap.ts
+ * Regenerate: node scripts/gen-society-facts.mjs
+ *
+ * Sent to the model as its own system message so it can answer questions about
+ * the physical layout — plot types, per-block ranges, which areas are amenities
+ * — none of which exist as queryable database fields.
+ */
+
+export const SOCIETY_FACTS = "## The society layout (from the approved site plan)\n\n440 numbered plots are drawn on the plan, across 12 blocks A to L —\nevery letter from A to L exists, K included, none is skipped. Plot numbers form\none continuous sequence; 8–27 are absent from the plan entirely, so a\nquestion about them has no answer on the map.\n\nEach block is a ring of plots wrapped around its own central park.\n\nThe plan classifies every plot into one of five types: Regular Plots 219, Prime Plots 117, Mortgage Plots 64, Odd Size Plots 40.\n\n### Residential plots per block\nThese ranges match the plot register, so they are safe to cross-check against\nthe `plots` collection.\n- A: 374–396 (23 plots)\n- B: 335, 345–367 (24 plots)\n- C: 280–302 (23 plots)\n- D: 251–273 (23 plots)\n- E: 225–245 (21 plots)\n- F: 200–221 (22 plots)\n- G: 173–193 (21 plots)\n- H: 148–169 (22 plots)\n- I: 119–141 (23 plots)\n- J: 92–112 (21 plots)\n- K: 67–88 (22 plots)\n- L: 1–7, 28–34 (14 plots)\n\n### Prime plots (gold on the plan)\nSold at a premium; they sit between the blocks and are listed here under the\nblock they adjoin.\n- beside A: 368–373 (6)\n- beside B: 303–334, 336–344 (41)\n- beside C: 274–279 (6)\n- beside D: 246–250 (5)\n- beside E: 222–224 (3)\n- beside F: 194–199 (6)\n- beside G: 170–172 (3)\n- beside H: 142–147 (6)\n- beside I: 113–118 (6)\n- beside J: 89–91 (3)\n- beside K: 35–66 (32)\n\n### Mortgage plots (dark on the plan)\nThe outer boundary ring.\n- beside A: 397–460 (64)\n\n### Non-residential areas\nServices Area, School, Shopping Mall, Mosque, Community Centre, Office, Graveyard. Each block also has its own park, plus the Central Park.\n\n### Answering rules for layout questions\n- These figures describe the PLAN, not the register. The `plots` collection is\n  authoritative for ownership, dues and allotment status; the plan is\n  authoritative for a plot's type and which block it physically sits in.\n- If the plan and the register disagree about a plot, say so rather than picking\n  one silently.\n- Plot type (regular / odd size / prime / mortgage / amenity) exists ONLY on the\n  plan. It is not a field in the database, so it cannot be filtered or counted\n  with a query — answer those questions from the figures above.";

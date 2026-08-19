@@ -17,6 +17,7 @@ import {
   FIELDS,
   PLOT_REF,
   GROUPABLE,
+  SUMMABLE,
   ALLOWED_OPERATORS,
   FORBIDDEN_OPERATORS,
   DEFAULT_LIMIT,
@@ -27,9 +28,11 @@ import {
   MAX_JOIN_IDS,
   SCHEMA_PROMPT,
   buildDateContext,
+  needsLayoutFacts,
   MONTH_KEYS as MONTHS,
   type CollectionName,
 } from './aiQuery.schema';
+import { SOCIETY_FACTS } from '../config/societyFacts';
 import Plot from '../models/Plot';
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -573,6 +576,76 @@ async function executeGroupCount(rawPlan: Record<string, any>): Promise<Executed
 }
 
 /**
+ * Total a money field, optionally broken down by one field. Pipeline built
+ * server-side from validated scalars — the model supplies only names and filters.
+ *
+ * Exists because "how much did we spend last year" is unanswerable with the other
+ * operations: `find` would return rows for the admin to add up by hand, and
+ * `groupCount` counts documents rather than summing money.
+ */
+async function executeSumAmount(rawPlan: Record<string, any>): Promise<Executed> {
+  const collection = validateCollection(rawPlan.collection);
+  const plan = normalisePlan(collection, rawPlan);
+
+  const summable = SUMMABLE[collection];
+  if (!summable) {
+    throw new AiQueryError(
+      `Totalling is not supported on ${collection}. Summable collections: ` +
+        `${Object.keys(SUMMABLE).join(', ')}.`,
+    );
+  }
+  const field = String(plan.field || '');
+  if (!summable.includes(field)) {
+    throw new AiQueryError(
+      `Cannot total "${field}" on ${collection}. Available: ${summable.join(', ')}.`,
+    );
+  }
+
+  // groupBy is optional; when absent we return a single grand total.
+  let groupBy = '';
+  if (plan.groupBy != null && plan.groupBy !== '') {
+    const groupable = GROUPABLE[collection] || [];
+    groupBy = String(plan.groupBy);
+    if (!groupable.includes(groupBy)) {
+      throw new AiQueryError(
+        `Cannot group ${collection} by "${groupBy}". Available: ${groupable.join(', ') || 'none'}.`,
+      );
+    }
+  }
+
+  const fields = FIELDS[collection];
+  const filter = validateFilter(plan.filter, fields, collection);
+  const join = await resolvePlotFilter(collection, plan.plotFilter);
+  const match = join ? { $and: [filter, join] } : filter;
+  const limit = clampLimit(plan.limit);
+
+  const Model: any = COLLECTIONS[collection];
+  const grouped: any[] = await Model.aggregate([
+    ...(Object.keys(match).length ? [{ $match: match }] : []),
+    {
+      $group: {
+        _id: groupBy ? `$${groupBy}` : null,
+        total: { $sum: `$${field}` },
+        count: { $sum: 1 },
+      },
+    },
+    { $sort: { total: -1 } },
+    { $limit: groupBy ? limit : 1 },
+  ]).option({ maxTimeMS: QUERY_TIMEOUT_MS });
+
+  const rows = groupBy
+    ? grouped.map((g) => ({ [groupBy]: g._id ?? '—', [`total ${field}`]: g.total, records: g.count }))
+    : [{ [`total ${field}`]: grouped[0]?.total ?? 0, records: grouped[0]?.count ?? 0 }];
+
+  return {
+    rows,
+    plan: { op: 'sumAmount', collection, field, groupBy: groupBy || null, filter: match, limit },
+    truncated: false,
+    rowCount: rows.length,
+  };
+}
+
+/**
  * Flatten a Mongo doc into table-friendly scalar columns: populated plot refs
  * become ownerName/plotBlock/..., the nested month map becomes payments.jan etc.
  */
@@ -668,6 +741,12 @@ export async function answerQuestion(question: string): Promise<AiQueryResult> {
   const messages: { role: string; content: string }[] = [
     { role: 'system', content: SCHEMA_PROMPT },
     { role: 'system', content: buildDateContext() },
+    // Physical-layout facts (plot types, per-block ranges). Not database fields,
+    // so the model cannot derive them — but ~600 tokens on every question would
+    // halve the free tier's questions-per-minute, hence the gate.
+    ...(needsLayoutFacts(question)
+      ? [{ role: 'system', content: SOCIETY_FACTS }]
+      : []),
     { role: 'user', content: question },
   ];
 
@@ -699,8 +778,12 @@ export async function answerQuestion(question: string): Promise<AiQueryResult> {
         case 'count':         executed = await executeCount(plan); break;
         case 'sumDuesByPlot': executed = await executeSumDuesByPlot(plan); break;
         case 'groupCount':    executed = await executeGroupCount(plan); break;
+        case 'sumAmount':     executed = await executeSumAmount(plan); break;
         default:
-          throw new AiQueryError(`Unsupported operation "${plan.op}".`);
+          throw new AiQueryError(
+            `Unsupported operation "${plan.op}". Use one of: find, count, ` +
+              `sumDuesByPlot, groupCount, sumAmount.`,
+          );
       }
       reinterpreted = parsed.reinterpreted;
     } catch (err) {

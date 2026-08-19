@@ -9,6 +9,7 @@ one-line answer plus a results table.
 | File | Role |
 |---|---|
 | `aiQuery.schema.ts` | Whitelists: collections, queryable fields, allowed operators, limits. Also holds the schema description sent to the LLM. **Single source of truth for what the AI may touch.** |
+| `../config/societyFacts.ts` | **Generated.** Site-plan facts (plot types, per-block number ranges) for questions the database cannot answer. Rebuild with `node scripts/gen-society-facts.mjs` from the repo root. |
 | `aiQuery.service.ts` | Groq calls, plan validation, read-only execution, result summarisation. |
 | `../controllers/aiQuery.controller.ts` | Input validation (length, type) and error mapping. |
 | `../routes/aiQuery.routes.ts` | `POST /api/ai/query`, `GET /api/ai/capabilities` — both behind `authMiddleware` + `adminOnly`. |
@@ -33,9 +34,18 @@ one-line answer plus a results table.
 is no code path to `save`, `update*`, `delete*`, `insert*`, or `bulkWrite`.
 
 **Allowlisted collections.** `plots`, `payments`, `receipts`, `blocks`,
-`phases`, `years`, `monthlyrates`, `complaints`.
+`phases`, `years`, `monthlyrates`, `complaints`, `collections`, `expenses`,
+`expensecategories`, `financesettings`, `notices`.
 Deliberately excluded: `admins` (password hashes), `otps`, `devices`,
-`auditlogs`. Requesting one of these is rejected as an unknown collection.
+`auditlogs`, `counters` (an internal sequence allocator). Requesting one of
+these is rejected as an unknown collection.
+
+Some fields are withheld even from allowlisted collections, because they carry
+no analytical value and only widen the surface: `expenses.attachmentUrl` (a raw
+bill-image URL), `notices.pdfPath`/`pdfPaths` (file paths), the `recordedBy` /
+`voidedBy` / `generatedBy` admin references, and `collections.allocations` (an
+array of subdocuments — the pre-computed arrears/current/advance split already
+answers the same questions without exposing `$elemMatch`).
 
 **Allowlisted fields.** Per-collection field lists in `FIELDS`, including the
 dotted month paths (`payments.jan` … `payments.dec`). A filter, sort, or
@@ -87,6 +97,63 @@ are handled without loosening any allowlist:
    "everyone is paid up" when it usually means no data exists for that period.
    Zero rows now return a fixed, honest message instead.
 
+## The cash book vs. dues — the distinction most likely to be got wrong
+
+`payments` and `collections` both hold money and are easy to conflate:
+
+- **`payments`** records *what the money is for* — which months of dues are cleared.
+- **`collections`** records *when the cash physically arrived* (`receivedDate` →
+  `bookYear`/`bookMonth`).
+
+A payment handed over in March 2026 clearing 2015 dues sits in `bookYear 2026`
+in `collections` and in `year 2015` in `payments`. So "how much did we collect
+in <period>" is a `collections` question, while "which months are unpaid" is a
+`payments` question. The prompt states this explicitly with worked examples.
+
+Two filters are near-mandatory on `collections`, and the prompt says so:
+`isVoided: false` (reversed mistakes) and `countInCashBook: true` (historical
+backfill for money collected *and spent* years ago — including it inflates
+income badly). `expenses` needs `isVoided: false` for the same reason.
+
+## Site-plan knowledge
+
+Plot *type* — regular, odd size, prime, mortgage — exists only on the approved
+site plan; no collection stores it. `societyFacts.ts` carries a compact prose
+summary (440 plots, per-block number ranges, the amenity list) generated from
+`frontend-admin/constants/societyMap.ts`, which is where the map is drawn.
+
+It is attached as its own system message, but **only when the question looks
+like a layout question** (`needsLayoutFacts`). The gate exists for cost, not
+correctness: see the token budget below. The prompt also tells the planner never
+to invent a `category`/`plotType` field on `plots`, so a layout question that
+slips past the gate returns an honest "this is about the site plan" rather than a
+fabricated filter.
+
+The generated file must be rebuilt when the map changes:
+
+```
+node scripts/gen-society-facts.mjs
+```
+
+## Token budget — the real ceiling on the free tier
+
+Groq's free tier caps at **8,000 tokens per minute**, and that, not request
+count, is what an admin runs into. Measured cost per question:
+
+| Case | Approx. tokens |
+|---|---|
+| Normal question, no retry | ~3,300 |
+| Normal question, one retry | ~6,200 |
+| Layout question, no retry | ~3,800 |
+
+So roughly **two questions per minute**, or one if a retry fires. The planner
+prompt is ~2,700 tokens because it documents 13 collections; a retry resends the
+whole message array, which is what makes retries expensive.
+
+Levers, cheapest first: leave the layout gate in place; set `GROQ_MODEL` to a
+smaller model; or move off the free tier, at which point the gate can be dropped
+and `SOCIETY_FACTS` attached unconditionally.
+
 ## Live-data quirks the prompt must account for
 
 These are properties of the actual database, not the models:
@@ -111,6 +178,14 @@ These are properties of the actual database, not the models:
 | `count` | How many documents match. |
 | `sumDuesByPlot` | Dues summed **across years** per plot, joined to owner details. |
 | `groupCount` | Counts grouped by one low-cardinality field (e.g. plots per block). |
+| `sumAmount` | Totals a money field, optionally broken down by one field. |
+
+`sumAmount` exists because "how much did we spend last year" was previously
+unanswerable: `find` would return rows for the admin to add up by hand, and
+`groupCount` counts documents rather than summing money. Summable fields are a
+separate allowlist (`SUMMABLE`) from `FIELDS`, because totalling a year, an
+ordinal, or an `_id` is never a sensible answer and would produce confident
+nonsense.
 
 ## Schema quirks the prompt has to teach the model
 

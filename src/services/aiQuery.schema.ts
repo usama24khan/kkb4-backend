@@ -24,6 +24,11 @@ import Phase from '../models/Phase';
 import Year from '../models/Year';
 import MonthlyRate from '../models/MonthlyRate';
 import Complaint from '../models/Complaint';
+import CashCollection from '../models/Collection';
+import Expense from '../models/Expense';
+import ExpenseCategory from '../models/ExpenseCategory';
+import FinanceSettings from '../models/FinanceSettings';
+import Notice from '../models/Notice';
 import {
   ALL_BLOCKS,
   ALL_PHASES,
@@ -50,6 +55,13 @@ export const COLLECTIONS = {
   years: Year,
   monthlyrates: MonthlyRate,
   complaints: Complaint,
+  // Cash book + notices. `collections` is imported as CashCollection to avoid
+  // shadowing the COLLECTIONS map itself.
+  collections: CashCollection,
+  expenses: Expense,
+  expensecategories: ExpenseCategory,
+  financesettings: FinanceSettings,
+  notices: Notice,
 } as const;
 
 export type CollectionName = keyof typeof COLLECTIONS;
@@ -86,6 +98,35 @@ export const FIELDS: Record<CollectionName, string[]> = {
     '_id', 'trackingNumber', 'trackingNumericId', 'year', 'name', 'mobile',
     'message', 'status', 'resolvedAt', 'createdAt', 'updatedAt',
   ],
+  // `allocations` is deliberately omitted: it is an array of subdocuments, and
+  // the pre-computed arrears/current/advance split already answers the
+  // analytical questions without exposing $elemMatch to the model.
+  collections: [
+    '_id', 'plot', 'amount', 'method', 'receivedDate', 'bookYear', 'bookMonth',
+    'bookOrdinal', 'arrearsAmount', 'currentAmount', 'advanceAmount',
+    'unallocatedAmount', 'entryType', 'countInCashBook', 'receiptRef', 'note',
+    'isVoided', 'voidedAt', 'voidReason', 'createdAt', 'updatedAt',
+  ],
+  // `attachmentUrl` omitted — a raw bill-image URL has no analytical use.
+  expenses: [
+    '_id', 'title', 'category', 'categoryName', 'amount', 'expenseDate',
+    'bookYear', 'bookMonth', 'bookOrdinal', 'paidTo', 'method', 'note',
+    'isVoided', 'voidedAt', 'voidReason', 'createdAt', 'updatedAt',
+  ],
+  expensecategories: [
+    '_id', 'name', 'nameUr', 'monthlyBudget', 'isActive', 'sortOrder',
+    'createdAt', 'updatedAt',
+  ],
+  financesettings: [
+    '_id', 'key', 'openingBalance', 'openingAsOf', 'note', 'createdAt', 'updatedAt',
+  ],
+  // `pdfPath`/`pdfPaths` omitted — file paths, not data. `generatedBy` omitted
+  // because it is an admin ObjectId the model can do nothing useful with.
+  notices: [
+    '_id', 'type', 'targetId', 'targetLabel', 'year', 'yearFrom', 'yearTo',
+    'monthFrom', 'monthTo', 'language', 'paymentDeadline', 'minDuesThreshold',
+    'plotCount', 'totalDue', 'createdAt', 'updatedAt',
+  ],
 };
 
 /**
@@ -96,6 +137,7 @@ export const FIELDS: Record<CollectionName, string[]> = {
 export const PLOT_REF: Partial<Record<CollectionName, string>> = {
   payments: 'plot',
   receipts: 'plotRef',
+  collections: 'plot',
 };
 
 /** Fields a `groupCount` may group by — kept low-cardinality on purpose. */
@@ -104,6 +146,25 @@ export const GROUPABLE: Partial<Record<CollectionName, string[]>> = {
   payments: ['year', 'mcRate'],
   receipts: ['year', 'month', 'blockNo', 'isVerified'],
   complaints: ['status'],
+  collections: ['bookYear', 'bookMonth', 'method', 'entryType', 'countInCashBook', 'isVoided'],
+  expenses: ['bookYear', 'bookMonth', 'categoryName', 'method', 'isVoided'],
+  expensecategories: ['isActive'],
+  notices: ['type', 'language', 'year', 'yearTo'],
+};
+
+/**
+ * Numeric fields a `sumAmount` may total. Separate from FIELDS because summing a
+ * non-monetary number (a year, an ordinal, an _id) is never a sensible answer
+ * and would produce confident nonsense.
+ */
+export const SUMMABLE: Partial<Record<CollectionName, string[]>> = {
+  collections: [
+    'amount', 'arrearsAmount', 'currentAmount', 'advanceAmount', 'unallocatedAmount',
+  ],
+  expenses: ['amount'],
+  payments: ['totalReceived', 'totalDue', 'remaining'],
+  receipts: ['amount'],
+  notices: ['totalDue', 'plotCount'],
 };
 
 // ── Operators ───────────────────────────────────────────────────────────────
@@ -186,6 +247,59 @@ export const SCHEMA_PROMPT = `You translate an admin's question about the KKB4 h
 - blockNo, plotNo, ownerName (denormalised strings), amount (number)
 - paymentDate (date), isVerified (boolean)
 
+### collections — THE CASH BOOK: one row per payment actually received
+Do not confuse this with \`payments\`. The distinction matters:
+- \`payments\` records **what the money is for** (which months of dues are cleared).
+- \`collections\` records **when the cash physically arrived**.
+A payment handed over in March 2026 clearing 2015 dues sits in bookYear 2026 /
+bookMonth 3 here, and in year 2015 in \`payments\`. So:
+  * "how much did we collect in <period>" -> collections, on bookYear/bookMonth
+  * "which months are unpaid for this plot" -> payments
+- plot (ObjectId -> plots), amount (number), method ("cash"|"bank"|"online"|"cheque"|"other")
+- receivedDate (date); bookYear (number), bookMonth (number 1-12) — the period
+  the cash landed in; bookOrdinal (number) = bookYear*12 + bookMonth, for ranges
+- arrearsAmount / currentAmount / advanceAmount (number) — the part of \`amount\`
+  paying for months before / during / after the book period
+- unallocatedAmount (number) — part not tied to any month (donation, fine)
+- entryType ("live"|"historical"), countInCashBook (boolean)
+- isVoided (boolean), voidedAt, voidReason
+**Two filters are almost always required on this collection:**
+  { "isVoided": false, "countInCashBook": true }
+\`isVoided: true\` rows are reversed mistakes. \`countInCashBook: false\` rows are
+historical backfill from money collected AND spent years ago — including them
+inflates income badly. Omit \`countInCashBook\` only if the admin explicitly asks
+about historical or archival entries.
+
+### expenses — money the society paid out
+- title (string), categoryName (string) — the spending heading, snapshotted at
+  write time (e.g. sweeper salary, petrol, sewerage); category (ObjectId)
+- amount (number), paidTo (string), method (same five values as collections)
+- expenseDate (date); bookYear, bookMonth, bookOrdinal — same meaning as above
+- note (string); isVoided (boolean), voidedAt, voidReason
+**Always add { "isVoided": false }** unless the admin asks about voided entries.
+
+### expensecategories — the spending headings
+- name, nameUr (string), monthlyBudget (number|null, a soft warning only,
+  never enforced), isActive (boolean), sortOrder (number)
+
+### financesettings — a SINGLE configuration document (key: "default")
+- openingBalance (number) — cash carried forward from before the system existed.
+  Every running-savings figure starts from it.
+- openingAsOf (date) — the period that balance is stated at. Month reports before
+  it are historical archive; from it onwards is live bookkeeping.
+- note (string)
+
+### notices — dues notices generated for owners
+- type ("plot"|"block"|"phase"), targetId (string), targetLabel (string) — a
+  readable label like "374 A", "374 A +4 more", "A", or "Phase 1"
+- year, yearFrom, yearTo (number); monthFrom, monthTo ("jan".."dec")
+- language ("en"|"ur"), paymentDeadline (date|null)
+- minDuesThreshold (number) — the dues cut-off the batch was generated at
+- plotCount (number) — plots covered by this notice
+- totalDue (number) — total dues the notice was issued for
+There is **no plot reference** on notices; use targetId / targetLabel, which hold
+strings. So plotFilter does not work here.
+
 ### Lookup collections
 - blocks: code, phase, isActive
 - phases: name, isActive
@@ -215,6 +329,25 @@ export const SCHEMA_PROMPT = `You translate an admin's question about the KKB4 h
 4. **groupCount** — counts grouped by one low-cardinality field.
    { "op": "groupCount", "collection": "plots", "groupBy": "block", "filter": {...}, "limit": 25 }
 
+5. **sumAmount** — TOTAL a money field, optionally broken down by one field.
+   Use this for every "how much" question about income or spending; never fetch
+   rows and expect the admin to add them up.
+   { "op": "sumAmount", "collection": "expenses", "field": "amount",
+     "filter": {...}, "groupBy": "categoryName", "plotFilter": {...}, "limit": 25 }
+   OMIT groupBy for a single grand total. Summable fields:
+   - collections: amount, arrearsAmount, currentAmount, advanceAmount, unallocatedAmount
+   - expenses: amount
+   - payments: totalReceived, totalDue, remaining
+   - receipts: amount
+   - notices: totalDue, plotCount
+   Worked examples:
+   - "total spent in 2025" -> { "op": "sumAmount", "collection": "expenses",
+       "field": "amount", "filter": { "bookYear": 2025, "isVoided": false } }
+   - "spending by category last year" -> same, plus "groupBy": "categoryName"
+   - "how much did we collect in 2026" -> { "op": "sumAmount",
+       "collection": "collections", "field": "amount",
+       "filter": { "bookYear": 2026, "isVoided": false, "countInCashBook": true } }
+
 ## Rules
 
 ### Phase rule — IMPORTANT
@@ -226,13 +359,19 @@ ${ALL_PHASES.map((p) => `- ${p} -> { "block": { "$in": ${JSON.stringify(PHASE_BL
 When you do this, set "reinterpreted" to note that the phase was resolved via
 its blocks. You MAY still return \`phase\` in a projection for display.
 
+### Plot type is NOT in the database
+The site plan classifies plots as regular / odd size / prime / mortgage, but no
+collection stores that. Never invent a \`category\`, \`plotType\` or \`type\` field on
+plots. If a question turns on plot type and you were not given the layout facts,
+set "unsupported" and say the question is about the site plan.
+
 ### Data coverage
 Payment data does not exist for every year in every block — some blocks only
 have early years (e.g. 2012–2014). Zero results for a recent year usually means
 no data was recorded, not that everyone paid. If a question names "this month"
 or "this year" and returns nothing, that is a legitimate empty result.
 
-- \`plotFilter\` applies ONLY on payments and receipts. It filters the related
+- \`plotFilter\` applies ONLY on payments, receipts and collections. It filters the related
   plot (block, phase, ownerName, allotmentStatus, plotNumber, isActive) and is
   the ONLY way to join. Never attempt $lookup, $expr, $where, or aggregation stages.
 - \`populatePlot: true\` on payments/receipts attaches the plot's ownerName,
@@ -269,10 +408,45 @@ export function buildDateContext(now = new Date()): string {
   ].join(' ');
 }
 
+/**
+ * Vocabulary that means the question is about the physical layout rather than
+ * the database — plot types, amenities, the shape of a block.
+ *
+ * Why gate at all: Groq's free tier caps at 8,000 tokens per minute and the
+ * planner prompt is already ~2,600 tokens. Attaching the layout facts to every
+ * question would cost another ~600 on each of up to two planning calls, roughly
+ * halving how many questions an admin can ask per minute. Layout questions are a
+ * small minority, so they pay that cost and nothing else does.
+ *
+ * Deliberately generous: a false positive only wastes tokens on one question,
+ * whereas a false negative makes the model claim it cannot answer. If you move
+ * off the free tier, drop the gate and attach SOCIETY_FACTS unconditionally.
+ */
+const LAYOUT_TERMS = [
+  'prime', 'odd size', 'odd-size', 'oddsize', 'mortgage', 'mortgaged',
+  'category', 'categories', 'amenity', 'amenities', 'regular plot',
+  'map', 'layout', 'site plan', 'siteplan',
+  'park', 'parks', 'school', 'mosque', 'graveyard', 'shopping mall',
+  'community centre', 'community center', 'services area', 'central park',
+  'how many plots', 'total plots', 'number of plots', 'plot count', 'boundary',
+];
+
+/**
+ * True when the question looks like it needs the site-plan facts.
+ * See LAYOUT_TERMS for why this is gated rather than always on.
+ */
+export function needsLayoutFacts(question: string): boolean {
+  const q = question.toLowerCase();
+  if (LAYOUT_TERMS.some((t) => q.includes(t))) return true;
+  // "what type is plot 199", "plot 12 type" — a bare "type" only counts when it
+  // is talking about a plot or block, since "type" alone is common elsewhere.
+  return /\btypes?\b/.test(q) && /\b(plot|block)\b/.test(q);
+}
+
 /** Compact reference echoed to the client so the UI can show what's queryable. */
 export const CAPABILITIES = {
   collections: Object.keys(COLLECTIONS),
-  operations: ['find', 'count', 'sumDuesByPlot', 'groupCount'],
+  operations: ['find', 'count', 'sumDuesByPlot', 'groupCount', 'sumAmount'],
   maxLimit: MAX_LIMIT,
   readOnly: true,
 };
