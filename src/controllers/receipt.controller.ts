@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { Types } from "mongoose";
 import Receipt from "../models/Receipt";
 import Plot from "../models/Plot";
 import { AuthRequest } from "../middleware/auth.middleware";
@@ -23,6 +24,19 @@ export const getReceipts = async (req: Request, res: Response): Promise<void> =>
     const q = String(req.query.q || "").trim();
 
     const filter: any = {};
+
+    // One plot's own receipts, for the plot detail view. Filtered on `plotRef`
+    // rather than the snapshotted plot/block strings so a renamed or renumbered
+    // plot keeps its history.
+    const plotId = String(req.query.plot_id || req.query.plotId || "").trim();
+    if (plotId) {
+      if (!Types.ObjectId.isValid(plotId)) {
+        sendError(res, "Invalid plot id", 400);
+        return;
+      }
+      filter.plotRef = new Types.ObjectId(plotId);
+    }
+
     if (q) {
       const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
       filter.$or = [
