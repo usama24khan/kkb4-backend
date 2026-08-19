@@ -195,165 +195,6 @@ function formatUnpaidMonthsEn(months: string[]): string {
   return months.map((m) => MONTH_NAMES[m].slice(0, 3)).join(", ");
 }
 
-function renderEnglish(
-  doc: PDFKit.PDFDocument,
-  plot: IPlot,
-  breakdowns: YearBreakdown[],
-  grandTotal: number,
-  yearLabel: string,
-  noticeNumber: number,
-  paymentDeadline?: Date | null,
-): void {
-  doc
-    .fontSize(20)
-    .font("Helvetica-Bold")
-    .text("KKB4 Housing Society", { align: "center" });
-  doc
-    .fontSize(10)
-    .font("Helvetica")
-    .text("Maintenance Fee Collection Office", { align: "center" });
-  doc.text(`Contact: ${SOCIETY_PHONE}`, { align: "center" });
-  doc.moveDown();
-  doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
-  doc.moveDown();
-
-  doc
-    .fontSize(14)
-    .font("Helvetica-Bold")
-    .text("MAINTENANCE DUE NOTICE", { align: "center" });
-  doc.moveDown(0.5);
-
-  doc.fontSize(10).font("Helvetica");
-  doc.text(`Notice No: ${noticeNumber}`);
-  doc.text(`Date: ${new Date().toLocaleDateString("en-GB")}`);
-  doc.text(`Covering: ${yearLabel}`);
-  doc.moveDown();
-
-  doc.fontSize(11).font("Helvetica-Bold").text("Owner Details:");
-  doc.fontSize(10).font("Helvetica");
-  doc.text(`Name: ${plot.ownerName || "—"}`);
-  doc.text(
-    `Plot Number: ${plot.plotNumber} | Block: ${plot.block} | Phase: ${canonicalPhase(plot) || "—"}`,
-  );
-  if (plot.ownerPhone) doc.text(`Phone: ${plot.ownerPhone}`);
-  doc.text(`Status: ${plot.allotmentStatus}`);
-  doc.moveDown();
-
-  doc.fontSize(11).font("Helvetica-Bold").text("Outstanding Dues");
-  doc.moveDown(0.4);
-
-  const tableLeft = 50;
-  const tableRight = 545;
-  const colWidths = [60, 230, 80, 105];
-  const headers = ["Year", "Months Unpaid", "Rate/Mo", "Amount Due"];
-
-  const headerY = doc.y;
-  doc.fontSize(10).font("Helvetica-Bold");
-  let xPos = tableLeft;
-  headers.forEach((h, i) => {
-    doc.text(h, xPos, headerY, { width: colWidths[i] });
-    xPos += colWidths[i];
-  });
-  doc
-    .moveTo(tableLeft, headerY + 16)
-    .lineTo(tableRight, headerY + 16)
-    .stroke();
-
-  doc.font("Helvetica");
-  let yPos = headerY + 22;
-
-  if (breakdowns.length === 0) {
-    doc
-      .fillColor("#059669")
-      .text("No outstanding dues for the selected period.", tableLeft, yPos);
-    doc.fillColor("black");
-    yPos += 24;
-  } else {
-    for (const row of breakdowns) {
-      xPos = tableLeft;
-      doc.text(String(row.year), xPos, yPos, { width: colWidths[0] });
-      xPos += colWidths[0];
-      doc.text(formatUnpaidMonthsEn(row.unpaidMonths), xPos, yPos, {
-        width: colWidths[1],
-      });
-      xPos += colWidths[1];
-      doc.text(formatPKR(row.mcRate), xPos, yPos, { width: colWidths[2] });
-      xPos += colWidths[2];
-      doc.text(formatPKR(row.amountDue), xPos, yPos, { width: colWidths[3] });
-      yPos += 18;
-      if (yPos > 720) {
-        doc.addPage();
-        yPos = 50;
-      }
-    }
-  }
-
-  doc.moveTo(tableLeft, yPos).lineTo(tableRight, yPos).stroke();
-  yPos += 10;
-
-  doc.fontSize(12).font("Helvetica-Bold");
-  doc.text("TOTAL OUTSTANDING", tableLeft, yPos, {
-    width: colWidths[0] + colWidths[1] + colWidths[2],
-  });
-  doc.text(
-    formatPKR(grandTotal),
-    tableLeft + colWidths[0] + colWidths[1] + colWidths[2],
-    yPos,
-    {
-      width: colWidths[3],
-    },
-  );
-  yPos += 24;
-
-  if (paymentDeadline) {
-    doc.fontSize(10).font("Helvetica-Bold");
-    doc.text(
-      `Please clear all outstanding dues by: ${new Date(paymentDeadline).toLocaleDateString("en-GB")}`,
-      tableLeft,
-      yPos,
-    );
-    yPos += 20;
-  }
-
-  doc.y = yPos + 6;
-  doc.fontSize(11).font("Helvetica-Bold").text("Payment Instructions:");
-  doc.fontSize(10).font("Helvetica");
-  doc.text("Please deposit your maintenance fee at the KKB4 Society Office.");
-
-  // The same note the Urdu notice carries, under the same heading, so a resident
-  // handed either version reads the same warning.
-  doc.moveDown(0.8);
-  doc.fontSize(11).font("Helvetica-Bold").text("Important Note:");
-  doc.fontSize(10).font("Helvetica");
-  doc.text(
-    "If payment is not received by the date above, society services for this plot may be " +
-      "suspended. Always collect a receipt — a payment without a receipt is not recorded.",
-  );
-  
-  doc.moveDown(2);
-
-  // Signature image above the line (right-aligned), then the line + labels.
-  const sigRight = 545;
-  const imgW = 90;
-  const imgH = imgW * SIGNATURE_RATIO;
-  // Avoid overflowing the page bottom — start a new page if there isn't room.
-  if (doc.y + imgH + 40 > doc.page.height - 50) {
-    doc.addPage();
-  }
-  if (fs.existsSync(SIGNATURE_PATH)) {
-    try {
-      doc.image(SIGNATURE_PATH, sigRight - imgW, doc.y, { width: imgW });
-      doc.y += imgH + 2;
-    } catch {
-      /* corrupt/unsupported image — fall back to a plain line */
-    }
-  }
-  doc.fillColor("black").fontSize(10).font("Helvetica");
-  doc.text("_________________________", 350, doc.y, { align: "right" });
-  doc.text("Secretary / Chairman", 350, doc.y + 5, { align: "right" });
-  doc.text("KKB4 Housing Society", 350, doc.y + 5, { align: "right" });
-}
-
 // ─── English PDF generator ───────────────────────────────────────────────────
 
 function generateEnglishPDF(input: NoticeInput): Promise<NoticeResult> {
@@ -371,10 +212,19 @@ function generateEnglishPDF(input: NoticeInput): Promise<NoticeResult> {
 
   // Render to the temp file first…
   const renderToTmp = new Promise<void>((resolve, reject) => {
-    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    const doc = new PDFDocument({ size: "A4", margin: 0 });
+    // The English notice carries Urdu too — the title, the note heading and the
+    // signatory line. If the font is missing the page still renders, in English
+    // alone, rather than failing outright.
+    let hasUrduFont = true;
+    try {
+      registerUrduFont(doc);
+    } catch {
+      hasUrduFont = false;
+    }
     const stream = fs.createWriteStream(tmpPath);
     doc.pipe(stream);
-    renderEnglish(
+    renderNotice(
       doc,
       plot,
       breakdowns,
@@ -382,6 +232,8 @@ function generateEnglishPDF(input: NoticeInput): Promise<NoticeResult> {
       yearLabel,
       noticeNumber,
       paymentDeadline,
+      "en",
+      hasUrduFont,
     );
     doc.end();
     stream.on("finish", () => resolve());
@@ -461,27 +313,31 @@ function line(
 }
 
 /**
- * The Urdu notice, laid out as an official Pakistani letter.
+ * The maintenance notice — one design, rendered for either language.
  *
- * Modelled on the form these notices actually take: a masthead naming the office
- * it comes from, a rule, the date and letter number beneath it, an underlined
- * subject, then the matter itself as prose. No table — the dues are stated as
- * lines, each given in Urdu and in English so either reader can check the
- * figures, which is how a society notice gets read in practice.
+ * Deliberately plain, because a resident has to be able to read it at the gate:
+ * the word NOTICE at the top in both languages, who and what it concerns in a
+ * bordered table, the dues stated as lines rather than a grid, the important
+ * note, the WhatsApp number, and the signature. Nothing else.
  *
- * Every Urdu string is drawn through `line()`, which reverses word order so a
- * left-to-right renderer produces right-to-left text; prose is broken into lines
- * beforehand by `wrapUrdu`, because letting PDFKit wrap already-reversed text
- * would order the lines backwards.
+ * `lead` decides which language comes first in each pair; both are always shown,
+ * so one notice serves an Urdu reader and an English reader alike.
+ *
+ * Urdu is drawn through `line()`, which reverses word order so a left-to-right
+ * renderer produces right-to-left text — see utils/urduText.ts. Urdu prose is
+ * broken into fitting lines by `wrapUrdu` first, since a reversed string must
+ * never be handed to PDFKit's own wrapping.
  */
-function renderUrdu(
+function renderNotice(
   doc: PDFKit.PDFDocument,
   plot: IPlot,
   breakdowns: YearBreakdown[],
   grandTotal: number,
   yearLabel: string,
   noticeNumber: number,
-  paymentDeadline?: Date | null,
+  paymentDeadline: Date | null | undefined,
+  lead: "en" | "ur",
+  hasUrduFont: boolean,
 ): void {
   const URDU = URDU_FONT_FAMILY;
   const LATIN = "Helvetica";
@@ -493,21 +349,25 @@ function renderUrdu(
   const RIGHT_X = mm(190);
   const CONTENT_W = RIGHT_X - LEFT_X;
 
-  // Nastaliq needs a taller line than a Latin face at the same size, and this is
-  // a letter rather than a form — it should breathe.
-  const LH = mm(10);
-  const LH_TIGHT = mm(8.5);
+  let y = mm(20);
 
-  let y = mm(18);
-
-  /** One Urdu line, right-aligned across the full width. */
-  const ur = (text: string, size = 12, colour = UR_DARK, x = LEFT_X, w = CONTENT_W) => {
+  /** An Urdu line, skipped entirely if the font could not be registered. */
+  const ur = (
+    text: string,
+    size: number,
+    x: number,
+    w: number,
+    align: "left" | "right" | "center" = "right",
+    colour: string = UR_DARK,
+  ) => {
+    if (!hasUrduFont) return;
     doc.font(URDU).fontSize(size).fillColor(colour);
-    line(doc, text, x, y, w, "right");
+    line(doc, text, x, y, w, align);
   };
 
-  /** Urdu prose, wrapped and drawn line by line. */
-  const paragraph = (text: string, size = 12, lh = LH, colour = UR_DARK) => {
+  /** Urdu prose, wrapped then drawn line by line; returns the height used. */
+  const urParagraph = (text: string, size: number, lh: number, colour = UR_DARK): void => {
+    if (!hasUrduFont) return;
     doc.font(URDU).fontSize(size).fillColor(colour);
     for (const l of wrapUrdu(doc, text, CONTENT_W)) {
       line(doc, l, LEFT_X, y, CONTENT_W, "right");
@@ -515,164 +375,215 @@ function renderUrdu(
     }
   };
 
-  /** English prose, wrapped by PDFKit — no direction to worry about. */
-  const english = (text: string, size = 9.5, colour = UR_SOFT_DARK, bold = false) => {
+  /** English prose, wrapped by PDFKit. */
+  const en = (text: string, size = 10, colour = UR_DARK, bold = false) => {
     doc.font(bold ? LATIN_B : LATIN).fontSize(size).fillColor(colour);
     doc.text(text, LEFT_X, y, { width: CONTENT_W, align: "left" });
-    y = doc.y + mm(1.5);
+    y = doc.y;
   };
 
-  // ── Masthead: which office this comes from ────────────────────────────────
+  // ── Title: the word NOTICE, in both languages, and nothing above it ───────
 
-  doc.font(URDU).fontSize(17).fillColor(UR_DARK);
-  line(doc, "از دفتر جنرل سیکریٹری کے کے بی فیز 4 ہاؤسنگ سوسائٹی", LEFT_X, y, CONTENT_W, "center");
-  y += mm(15);
+  doc.font(LATIN_B).fontSize(26).fillColor(UR_DARK);
+  doc.text("NOTICE", LEFT_X, y, { width: CONTENT_W, align: "center" });
+  y = doc.y + mm(1);
+
+  if (hasUrduFont) {
+    doc.font(URDU).fontSize(18).fillColor(UR_DARK);
+    line(doc, "نوٹس", LEFT_X, y, CONTENT_W, "center");
+    // Nastaliq drops well below its origin — the rule was crossing the word.
+    y += mm(16);
+  }
 
   doc.strokeColor(UR_DARK).lineWidth(mm(0.6));
   doc.moveTo(LEFT_X, y).lineTo(RIGHT_X, y).stroke();
-  y += mm(5);
+  y += mm(6);
 
-  // ── Date (right) and letter number (left) ────────────────────────────────
+  // ── Who and what this concerns ────────────────────────────────────────────
 
-  const dateStr = new Date().toLocaleDateString("en-GB");
-  // Each of these is one string rather than a label plus a value in a
-  // width-measured box: the Latin run keeps its own order inside an Urdu line,
-  // and there is no box to overflow.
-  doc.font(URDU).fontSize(11).fillColor(UR_DARK);
-  line(doc, `مورخہ: ${dateStr}`, LEFT_X, y, CONTENT_W, "right");
-  line(doc, `مراسلہ نمبر: ${noticeNumber}`, LEFT_X, y, CONTENT_W / 2, "right");
-  y += mm(12);
+  const status = plot.allotmentStatus || "Unknown";
+  const rows: Array<{ en: string; ur: string; value: string }> = [
+    { en: "Notice No", ur: "نوٹس نمبر", value: String(noticeNumber) },
+    { en: "Date", ur: "تاریخ", value: new Date().toLocaleDateString("en-GB") },
+    { en: "Owner", ur: "مالک", value: plot.ownerName || "—" },
+    {
+      en: "Plot / Block / Phase",
+      ur: "پلاٹ / بلاک / فیز",
+      value: `${plot.plotNumber || "?"} / ${plot.block || "?"} / ${canonicalPhase(plot) || "—"}`,
+    },
+  ];
+  if (plot.ownerPhone) rows.push({ en: "Phone", ur: "فون", value: plot.ownerPhone });
+  rows.push({
+    en: "Status",
+    ur: "حیثیت",
+    value: hasUrduFont ? status : status,
+  });
 
-  // ── Subject ───────────────────────────────────────────────────────────────
+  const LABEL_W = mm(62);
+  const ROW_H = mm(8);
+  const tableTop = y;
 
-  doc.font(URDU).fontSize(11).fillColor(UR_DARK);
-  const subjLabelW = doc.widthOfString(forPdf("عنوان:۔"));
-  line(doc, "عنوان:۔", RIGHT_X - subjLabelW, y, subjLabelW, "right");
+  for (const row of rows) {
+    // English label at the left of the cell, Urdu at the right of it, so the
+    // reader finds the label in whichever script they read.
+    doc.font(LATIN_B).fontSize(9.5).fillColor(UR_SOFT_DARK);
+    doc.text(row.en, LEFT_X + mm(3), y + mm(3), { width: LABEL_W - mm(6), align: "left", lineBreak: false });
+    if (hasUrduFont) {
+      doc.font(URDU).fontSize(9).fillColor(UR_SOFT_DARK);
+      line(doc, row.ur, LEFT_X + mm(3), y + mm(0.8), LABEL_W - mm(6), "right");
+    }
 
-  doc.font(URDU).fontSize(16).fillColor(UR_DARK);
-  const titleW = doc.widthOfString(forPdf("نوٹس"));
-  const titleX = (PAGE_W - titleW) / 2;
-  doc.text(forPdf("نوٹس"), titleX, y - mm(2), { lineBreak: false });
-  // The underline the form always carries beneath the subject.
-  doc.strokeColor(UR_DARK).lineWidth(mm(0.4));
-  doc.moveTo(titleX - mm(2), y + mm(7)).lineTo(titleX + titleW + mm(2), y + mm(7)).stroke();
-  y += mm(16);
+    doc.font(LATIN).fontSize(11).fillColor(UR_DARK);
+    doc.text(row.value, LEFT_X + LABEL_W + mm(3), y + mm(2.8), {
+      width: CONTENT_W - LABEL_W - mm(6), align: "left", lineBreak: false,
+    });
 
-  // ── Who this concerns ─────────────────────────────────────────────────────
-
-  const phase = canonicalPhase(plot) || "";
-  const owner = plot.ownerName || "";
-  paragraph(
-    `جناب ${owner} صاحب، پلاٹ نمبر ${plot.plotNumber || "?"}، بلاک ${plot.block || "?"}` +
-      `${phase ? `، ${phase}` : ""} کے مالک/قابض ہیں۔`,
-  );
-  if (plot.ownerPhone) {
-    y += mm(3);
-    doc.font(URDU).fontSize(11).fillColor(UR_MUTED);
-    line(doc, `فون نمبر: ${plot.ownerPhone}`, LEFT_X, y, CONTENT_W, "right");
-    y += LH;
+    y += ROW_H;
+    doc.strokeColor(UR_LINE_GREY).lineWidth(mm(0.2));
+    doc.moveTo(LEFT_X, y).lineTo(RIGHT_X, y).stroke();
   }
-  y += mm(5);
 
-  paragraph(
-    `آپ کی مینٹیننس فیس مندرجہ ذیل عرصے (${yearLabel}) کی واجب الادا ہے۔ ` +
-      `تفصیل درج ذیل ہے:`,
+  // Outer border and the divider between label and value columns.
+  doc.strokeColor(UR_LINE_GREY).lineWidth(mm(0.35));
+  doc.rect(LEFT_X, tableTop, CONTENT_W, y - tableTop).stroke();
+  doc.moveTo(LEFT_X + LABEL_W, tableTop).lineTo(LEFT_X + LABEL_W, y).stroke();
+  y += mm(7);
+
+  // ── The message ───────────────────────────────────────────────────────────
+
+  /**
+   * One statement in both languages, English then Urdu (or the reverse when the
+   * notice leads in Urdu). Each gets its own band of the page: drawing them at
+   * the same y let a Nastaliq line, which reaches much lower than a Latin one,
+   * land on top of its own translation.
+   */
+  const pair = (enText: string, urText: string, enSize = 10.5, urSize = 12, bold = false) => {
+    const drawEn = () => {
+      doc.font(bold ? LATIN_B : LATIN).fontSize(enSize).fillColor(UR_DARK);
+      doc.text(enText, LEFT_X, y, { width: CONTENT_W, align: "left" });
+      y = doc.y + mm(2);
+    };
+    const drawUr = () => {
+      if (!hasUrduFont) return;
+      urParagraph(urText, urSize, mm(9.5));
+      y += mm(2.5);
+    };
+    if (lead === "en") { drawEn(); drawUr(); } else { drawUr(); drawEn(); }
+  };
+
+  pair(
+    `Your maintenance fee for ${yearLabel} has not been paid. The details are:`,
+    `آپ کی مینٹیننس فیس (${yearLabel}) واجب الادا ہے۔ تفصیل درج ذیل ہے:`,
+    11,
+    12,
   );
   y += mm(3);
 
-  // ── The dues, stated as lines in both languages ───────────────────────────
-
   if (!breakdowns.length) {
-    paragraph("مذکورہ مدت کے لیے کوئی رقم واجب الادا نہیں ہے۔");
-    english("No maintenance dues are outstanding for this period.");
+    pair(
+      "No maintenance dues are outstanding for this period.",
+      "مذکورہ مدت کے لیے کوئی رقم واجب الادا نہیں ہے۔",
+    );
   } else {
     for (const row of breakdowns) {
       const months = row.unpaidMonths.length;
       const amount = row.amountDue.toLocaleString("en-US");
 
-      // Urdu on the right, its English counterpart on the left of the same line.
-      doc.font(URDU).fontSize(12).fillColor(UR_DARK);
+      doc.font(LATIN).fontSize(10.5).fillColor(UR_DARK);
+      const enText =
+        months === 12
+          ? `${row.year}:  full year  —  PKR ${amount}`
+          : `${row.year}:  ${months} month${months === 1 ? "" : "s"}  —  PKR ${amount}`;
+      doc.text(enText, LEFT_X + mm(4), y + mm(2.5), {
+        width: CONTENT_W / 2, align: "left", lineBreak: false,
+      });
+
       const urText =
         months === 12
           ? `سال ${row.year}: پورا سال — ${amount} روپے`
           : `سال ${row.year}: ${months} ماہ — ${amount} روپے`;
-      line(doc, urText, PAGE_W / 2 - mm(6), y, CONTENT_W / 2 + mm(16) - mm(6), "right");
+      ur(urText, 12, PAGE_W / 2 - mm(10), CONTENT_W / 2 + mm(20) - mm(10));
 
-      doc.font(LATIN).fontSize(10).fillColor(UR_SOFT_DARK);
-      const enText =
-        months === 12
-          ? `${row.year}: full year — PKR ${amount}`
-          : `${row.year}: ${months} month${months === 1 ? "" : "s"} — PKR ${amount}`;
-      doc.text(enText, LEFT_X, y + mm(2), { width: CONTENT_W / 2, align: "left", lineBreak: false });
-
-      y += LH_TIGHT + mm(1.5);
+      y += mm(8);
     }
 
-    y += mm(2);
+    y += mm(2.5);
     doc.strokeColor(UR_LINE_GREY).lineWidth(mm(0.3));
     doc.moveTo(LEFT_X, y).lineTo(RIGHT_X, y).stroke();
     y += mm(5);
 
-    doc.font(URDU).fontSize(13).fillColor(UR_DARK);
-    line(doc, `کل واجب الادا رقم: ${grandTotal.toLocaleString("en-US")} روپے`,
-      PAGE_W / 2 - mm(6), y, CONTENT_W / 2 + mm(16) - mm(6), "right");
-    doc.font(LATIN_B).fontSize(11).fillColor(UR_DARK);
-    doc.text(`Total outstanding: PKR ${grandTotal.toLocaleString("en-US")}`, LEFT_X, y + mm(2), {
+    const total = grandTotal.toLocaleString("en-US");
+    doc.font(LATIN_B).fontSize(12).fillColor(UR_DARK);
+    doc.text(`Total outstanding:  PKR ${total}`, LEFT_X + mm(4), y + mm(2.5), {
       width: CONTENT_W / 2, align: "left", lineBreak: false,
     });
-    y += LH + mm(3);
+    ur(`کل واجب الادا رقم: ${total} روپے`, 13, PAGE_W / 2 - mm(10), CONTENT_W / 2 + mm(20) - mm(10));
+    y += mm(12);
   }
-
-  // ── Deadline ──────────────────────────────────────────────────────────────
 
   if (paymentDeadline) {
     const deadline = new Date(paymentDeadline).toLocaleDateString("en-GB");
-    paragraph(`براہ کرم مذکورہ رقم ${deadline} تک سوسائٹی آفس میں جمع کروائیں۔`);
-    y += mm(1);
-    english(`Please clear the above amount at the society office by ${deadline}.`);
-    y += mm(4);
+    pair(
+      `Please pay at the society office by ${deadline}.`,
+      `براہ کرم مذکورہ رقم ${deadline} تک سوسائٹی آفس میں جمع کروائیں۔`,
+      10.5,
+      12,
+      true,
+    );
+    y += mm(2);
   }
 
   // ── Important note, in both languages ─────────────────────────────────────
 
+  const NOTE_EN =
+    "Society services may be suspended if payment is not received by the date above. " +
+    "Always collect a receipt — a payment without one is not recorded.";
+  const NOTE_UR =
+    "مقررہ تاریخ تک ادائیگی نہ ہونے پر سوسائٹی کی سہولیات معطل ہو سکتی ہیں۔ " +
+    "ادائیگی کی رسید ضرور حاصل کریں۔";
+
+  const noteTop = y;
+  y += mm(4);
+
+  // Both headings on one line, then the two texts stacked — the Urdu heading was
+  // landing in the middle of the English sentence.
+  doc.font(LATIN_B).fontSize(11).fillColor(UR_DARK);
+  doc.text("Important Note", LEFT_X + mm(4), y + mm(1), {
+    width: CONTENT_W / 2, align: "left", lineBreak: false,
+  });
+  ur("اہم نوٹ", 12, PAGE_W / 2, CONTENT_W / 2 - mm(4));
+  y += mm(11);
+
+  doc.font(LATIN).fontSize(9.5).fillColor(UR_DARK);
+  doc.text(NOTE_EN, LEFT_X + mm(4), y, { width: CONTENT_W - mm(8), align: "left" });
+  y = doc.y + mm(2);
+  if (hasUrduFont) {
+    doc.font(URDU).fontSize(11).fillColor(UR_DARK);
+    for (const l of wrapUrdu(doc, NOTE_UR, CONTENT_W - mm(8))) {
+      line(doc, l, LEFT_X + mm(4), y, CONTENT_W - mm(8), "right");
+      y += mm(8);
+    }
+  }
   y += mm(2);
-  doc.font(URDU).fontSize(12.5).fillColor(UR_DARK);
-  const noteHeadW = doc.widthOfString(forPdf("اہم نوٹ:۔"));
-  line(doc, "اہم نوٹ:۔", RIGHT_X - noteHeadW, y, noteHeadW, "right");
-  y += LH;
 
-  paragraph(
-    "مقررہ تاریخ تک ادائیگی نہ ہونے کی صورت میں سوسائٹی کی سہولیات معطل کی جا سکتی ہیں۔ " +
-      "ادائیگی کے بعد رسید ضرور حاصل کریں، کیونکہ رسید کے بغیر ادائیگی کا اندراج نہیں ہوتا۔",
-    11.5,
-    mm(9.5),
-  );
-  y += mm(4);
-
-  doc.font(LATIN_B).fontSize(10).fillColor(UR_DARK);
-  doc.text("Important Note:", LEFT_X, y, { width: CONTENT_W, align: "left" });
-  y = doc.y + mm(1);
-  english(
-    "If payment is not received by the date above, society services for this plot may be " +
-      "suspended. Always collect a receipt — a payment without a receipt is not recorded.",
-  );
-  y += mm(4);
+  // A light box, so the note reads as the warning it is.
+  doc.strokeColor(UR_LINE_GREY).lineWidth(mm(0.35));
+  doc.rect(LEFT_X, noteTop, CONTENT_W, y - noteTop).stroke();
+  y += mm(7);
 
   // ── Contact ───────────────────────────────────────────────────────────────
 
-  doc.font(LATIN_B).fontSize(11).fillColor(UR_DARK);
-  doc.text(`Whats App No. ${SOCIETY_PHONE}`, LEFT_X, y, { width: CONTENT_W, align: "left" });
-  y = doc.y + mm(4);
+  doc.font(LATIN_B).fontSize(12).fillColor(UR_DARK);
+  doc.text(`WhatsApp: ${SOCIETY_PHONE}`, LEFT_X, y, { width: CONTENT_W, align: "left" });
+  y = doc.y + mm(6);
 
-  // ── Signature, bottom right ───────────────────────────────────────────────
+  // ── Signature ─────────────────────────────────────────────────────────────
 
-  const sigW = mm(60);
+  const sigW = mm(66);
   const sigX = RIGHT_X - sigW;
   const sigImgW = mm(18);
   const sigImgH = sigImgW * SIGNATURE_RATIO;
-  // The image sits above the line, so the line has to clear the last line of
-  // text by the image's height plus a margin.
-  const sigY = Math.max(y + sigImgH + mm(5), PAGE_H - mm(18) - mm(26));
+  const sigY = Math.max(y + sigImgH + mm(5), PAGE_H - mm(20) - mm(24));
 
   if (fs.existsSync(SIGNATURE_PATH)) {
     try {
@@ -687,16 +598,20 @@ function renderUrdu(
   doc.strokeColor(UR_DARK).lineWidth(mm(0.3));
   doc.moveTo(sigX, sigY).lineTo(RIGHT_X, sigY).stroke();
 
-  doc.font(URDU).fontSize(11).fillColor(UR_DARK);
-  line(doc, "جنرل سیکریٹری", sigX, sigY + mm(3), sigW, "right");
-  doc.font(URDU).fontSize(10).fillColor(UR_SOFT_DARK);
-  line(doc, "کے کے بی فیز 4 ہاؤسنگ سوسائٹی", sigX, sigY + mm(11), sigW, "right");
+  doc.font(LATIN_B).fontSize(10).fillColor(UR_DARK);
+  doc.text("General Secretary / Chairman", sigX, sigY + mm(2.5), {
+    width: sigW, align: "center", lineBreak: false,
+  });
+  if (hasUrduFont) {
+    doc.font(URDU).fontSize(10.5).fillColor(UR_DARK);
+    line(doc, "جنرل سیکریٹری / چیئرمین", sigX, sigY + mm(8), sigW, "center");
+  }
 
   if (process.env.NOTICE_LAYOUT_DEBUG === "1") {
     const asMm = (v: number) => (v / mm(1)).toFixed(1);
     console.log(
-      `[notice layout] content ends ${asMm(y)}mm · signature line ${asMm(sigY)}mm` +
-        ` · footer ends ${asMm(sigY + mm(16))}mm · page 297mm`,
+      `[notice ${lead}] content ends ${asMm(y)}mm · signature ${asMm(sigY)}mm` +
+        ` · footer ends ${asMm(sigY + mm(15))}mm · page 297mm`,
     );
   }
 }
@@ -730,7 +645,7 @@ async function generateUrduPDF(input: NoticeInput): Promise<NoticeResult> {
     }
     const stream = fs.createWriteStream(tmpPath);
     doc.pipe(stream);
-    renderUrdu(
+    renderNotice(
       doc,
       plot,
       breakdowns,
@@ -738,6 +653,8 @@ async function generateUrduPDF(input: NoticeInput): Promise<NoticeResult> {
       yearLabel,
       noticeNumber,
       paymentDeadline,
+      "ur",
+      true,
     );
     doc.end();
     stream.on("finish", () => resolve());
