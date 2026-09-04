@@ -475,6 +475,31 @@ function sortDirection(raw: unknown): 1 | -1 {
   return Number(raw) > 0 ? 1 : -1;
 }
 
+/**
+ * The executed plan is echoed to the admin under "Show query". A resolved
+ * `plotFilter` is a literal `$in` of every matching plot _id — hundreds of them
+ * on a whole-society question — which buries the readable part of the query. So
+ * collapse the id list to a count for display only; the filter that actually ran
+ * is untouched.
+ */
+function echoFilter(match: Record<string, any>, refField?: string): Record<string, any> {
+  if (!refField) return match;
+  const collapse = (node: any): any => {
+    if (Array.isArray(node)) return node.map(collapse);
+    if (!isPlainObject(node)) return node;
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(node)) {
+      if (k === refField && isPlainObject(v) && Array.isArray(v.$in)) {
+        out[k] = { $in: `<${v.$in.length} plot ids matching plotFilter>` };
+      } else {
+        out[k] = collapse(v);
+      }
+    }
+    return out;
+  };
+  return collapse(match);
+}
+
 // ── Execution ───────────────────────────────────────────────────────────────
 
 interface Executed {
@@ -482,6 +507,13 @@ interface Executed {
   plan: Record<string, any>;
   truncated: boolean;
   rowCount: number;
+  /**
+   * Underlying documents behind the rows, where that differs from `rowCount`.
+   * Zero-filled groupings return a full row per block even when NOTHING matched,
+   * so without this the summariser announces "block A has the lowest collection"
+   * for a period where no collection was ever recorded.
+   */
+  matched?: number;
 }
 
 async function executeFind(rawPlan: Record<string, any>): Promise<Executed> {
@@ -517,7 +549,7 @@ async function executeFind(rawPlan: Record<string, any>): Promise<Executed> {
   return {
     rows: docs.slice(0, limit).map(flattenRow),
     plan: {
-      op: 'find', collection, filter: finalFilter, sort, projection, limit,
+      op: 'find', collection, filter: echoFilter(finalFilter, refField), sort, projection, limit,
       populatePlot: !!plan.populatePlot,
     },
     truncated,
@@ -539,7 +571,7 @@ async function executeCount(rawPlan: Record<string, any>): Promise<Executed> {
 
   return {
     rows: [{ collection, count }],
-    plan: { op: 'count', collection, filter: finalFilter },
+    plan: { op: 'count', collection, filter: echoFilter(finalFilter, PLOT_REF[collection]) },
     truncated: false,
     rowCount: 1,
   };
@@ -689,7 +721,10 @@ async function executeGroupCount(rawPlan: Record<string, any>): Promise<Executed
   if (!plotGroupBy) {
     return {
       rows: buckets.map((g) => ({ [groupBy]: g._id ?? '—', count: g.count })),
-      plan: { op: 'groupCount', collection, groupBy, filter: match, sortDir, limit },
+      plan: {
+        op: 'groupCount', collection, groupBy,
+        filter: echoFilter(match, refField), sortDir, limit,
+      },
       truncated: false,
       rowCount: buckets.length,
     };
@@ -703,11 +738,13 @@ async function executeGroupCount(rawPlan: Record<string, any>): Promise<Executed
   return {
     rows: folded.map((g) => ({ [plotGroupBy]: g.label, count: g.count })),
     plan: {
-      op: 'groupCount', collection, plotGroupBy, filter: match, sortDir, limit,
+      op: 'groupCount', collection, plotGroupBy,
+      filter: echoFilter(match, refField), sortDir, limit,
       zeroFilled: !join,
     },
     truncated: false,
     rowCount: folded.length,
+    matched: folded.reduce((n, g) => n + g.count, 0),
   };
 }
 
@@ -794,11 +831,13 @@ async function executeSumAmount(rawPlan: Record<string, any>): Promise<Executed>
         records: g.count,
       })),
       plan: {
-        op: 'sumAmount', collection, field, plotGroupBy, filter: match, sortDir, limit,
+        op: 'sumAmount', collection, field, plotGroupBy,
+        filter: echoFilter(match, refField), sortDir, limit,
         zeroFilled: !join,
       },
       truncated: false,
       rowCount: folded.length,
+      matched: folded.reduce((n, g) => n + g.count, 0),
     };
   }
 
@@ -810,10 +849,13 @@ async function executeSumAmount(rawPlan: Record<string, any>): Promise<Executed>
     rows,
     plan: {
       op: 'sumAmount', collection, field, groupBy: groupBy || null,
-      filter: match, sortDir, limit,
+      filter: echoFilter(match, refField), sortDir, limit,
     },
     truncated: false,
     rowCount: rows.length,
+    // A grand total always produces one row, so rowCount alone can't tell an
+    // admin apart "we collected nothing" from "nothing was ever recorded".
+    matched: grouped.reduce((n, g) => n + (g.count || 0), 0),
   };
 }
 
@@ -1008,7 +1050,7 @@ export async function answerQuestion(question: string): Promise<AiQueryResult> {
   // recorded for that period. Wrong-but-confident answers about who owes money
   // are the ones an admin would act on.
   const answer =
-    executed.rowCount === 0
+    executed.rowCount === 0 || executed.matched === 0
       ? 'No records matched. An empty result can mean the data was never recorded rather than ' +
         'that nothing is outstanding — check the query below to see what was actually asked of the database.'
       : await summarise(question, executed);

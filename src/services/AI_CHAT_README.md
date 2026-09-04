@@ -64,6 +64,11 @@ per-plot aggregation buckets up by block/phase/allotment status using a plot
 `_id` → label map we build ourselves. No `$lookup`, no `$graphLookup`, no
 `$expr`.
 
+**Readable plan echo.** The plan shown under "Show query" passes through
+`echoFilter`, which collapses a resolved `plotFilter` (`{ plot: { $in: [...] } }`
+— up to hundreds of ObjectIds) to `"<N plot ids matching plotFilter>"`. Display
+only; the filter that ran is untouched.
+
 **Bounded cost.** Results clamp to 200 rows (default 25), filters to 6 levels
 of nesting, `$regex` patterns to 100 characters, and every query carries
 `maxTimeMS: 8000`. Rate limit: 30 questions per admin IP per 5 minutes. Groq's own free tier also
@@ -222,6 +227,13 @@ Two details that matter for correctness:
 
 `sortDir` exists for the same reason: the pipeline used to hardcode
 `{ total: -1 }`, so a "lowest" question was answered with a largest-first list.
+
+Zero-fill needed one more guard. A zero-filled grouping returns a full row per
+block even when nothing matched at all, so `rowCount` alone no longer means
+"we found something" — asked about a period with no cash book at all, the
+summariser announced *"block A has the lowest collection"* as if it were a
+finding. `Executed.matched` now carries the underlying document count, and a
+`matched` of zero gets the same honest empty-result message as zero rows.
 
 Two planner repairs support this: `normalisePlan` moves a `groupBy` that names a
 plot attribute (`block`, `plot.block`, `phase`) into `plotGroupBy`, and an
