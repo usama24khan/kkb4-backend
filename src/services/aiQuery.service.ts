@@ -17,6 +17,9 @@ import {
   FIELDS,
   PLOT_REF,
   GROUPABLE,
+  PLOT_GROUPABLE,
+  plotGroupValue,
+  plotGroupDomain,
   SUMMABLE,
   ALLOWED_OPERATORS,
   FORBIDDEN_OPERATORS,
@@ -315,6 +318,8 @@ async function resolvePlotFilter(
  *  2. Dotted paths through the ref (`plot.block`, `plotRef.ownerName`) inside a
  *     payments/receipts filter — Mongo can't traverse a ref, so lift those keys
  *     into `plotFilter`, which resolves the join properly.
+ *  3. `groupBy: "block"` on a collection that only reaches a block through its
+ *     plot — that is `plotGroupBy`, so move it there.
  *
  * Only top-level filter keys are rewritten; a dotted ref path buried inside
  * $and/$or still fails validation with a clear message.
@@ -337,6 +342,18 @@ function normalisePlan(collection: CollectionName, plan: Record<string, any>): R
   if (!refField) {
     delete out.plotFilter;
     return out;
+  }
+
+  // 3. `groupBy` naming a plot attribute (`block`, `plot.block`, `phase`) on a
+  //    plot-referencing collection. The cash book has no block of its own, so
+  //    what the model means is `plotGroupBy`.
+  if (out.plotGroupBy == null || out.plotGroupBy === '') {
+    const asked = String(out.groupBy ?? '').replace(/^(?:plot|plotRef)\./, '');
+    const ownFields = GROUPABLE[collection] || [];
+    if ((PLOT_GROUPABLE as readonly string[]).includes(asked) && !ownFields.includes(asked)) {
+      out.plotGroupBy = asked;
+      delete out.groupBy;
+    }
   }
 
   const lifted: Record<string, any> = isPlainObject(out.plotFilter) ? { ...out.plotFilter } : {};
@@ -376,6 +393,86 @@ function normalisePlan(collection: CollectionName, plan: Record<string, any>): R
   }
 
   return out;
+}
+
+/**
+ * Group-by an attribute of the RELATED plot (block, phase, allotment status) for
+ * the three collections that reference a plot.
+ *
+ * Why this exists: the cash book, dues and receipts store no block of their own,
+ * so "which block collected least in 2026" has no in-collection field to group
+ * on, and $lookup is forbidden. We instead group by the plot ref, then fold
+ * those per-plot buckets up in memory using a plot _id -> label map. Cheap
+ * because the plot register is a few hundred rows, and it keeps the no-LLM-joins
+ * rule intact.
+ */
+function validatePlotGroupBy(
+  collection: CollectionName,
+  raw: unknown,
+): string | null {
+  if (raw == null || raw === '') return null;
+  const field = String(raw);
+  if (!PLOT_REF[collection]) {
+    throw new AiQueryError(
+      `plotGroupBy is not supported on ${collection}. It works on ` +
+        `${Object.keys(PLOT_REF).join(', ')}.`,
+    );
+  }
+  if (!(PLOT_GROUPABLE as readonly string[]).includes(field)) {
+    throw new AiQueryError(
+      `Cannot group by plot "${field}". Available: ${PLOT_GROUPABLE.join(', ')}.`,
+    );
+  }
+  return field;
+}
+
+/** plot _id -> grouping label, restricted to the ids the join already selected. */
+async function buildPlotLabelMap(
+  plotGroupBy: string,
+  join: Record<string, any> | null,
+  refField: string,
+): Promise<Map<string, string>> {
+  const filter = join ? { _id: join[refField] } : {};
+  const plots = await Plot.find(filter)
+    .select('block allotmentStatus')
+    .maxTimeMS(QUERY_TIMEOUT_MS)
+    .lean();
+  const map = new Map<string, string>();
+  for (const p of plots as any[]) map.set(String(p._id), plotGroupValue(p, plotGroupBy));
+  return map;
+}
+
+/**
+ * Fold per-plot aggregation buckets into per-label buckets.
+ *
+ * Zero-fills the labels that produced no rows at all (every block, every phase)
+ * unless a plotFilter deliberately narrowed the question — without that, a block
+ * which collected nothing has no bucket, and "which block collected least"
+ * would confidently name the smallest NON-zero block instead.
+ */
+function foldPlotGroups(
+  buckets: Array<{ _id: any; total: number; count: number }>,
+  labels: Map<string, string>,
+  plotGroupBy: string,
+  zeroFill: boolean,
+): Array<{ label: string; total: number; count: number }> {
+  const acc = new Map<string, { total: number; count: number }>();
+  if (zeroFill) {
+    for (const label of plotGroupDomain(plotGroupBy) ?? []) acc.set(label, { total: 0, count: 0 });
+  }
+  for (const b of buckets) {
+    const label = labels.get(String(b._id)) ?? 'Unknown';
+    const cur = acc.get(label) ?? { total: 0, count: 0 };
+    cur.total += b.total || 0;
+    cur.count += b.count || 0;
+    acc.set(label, cur);
+  }
+  return [...acc.entries()].map(([label, v]) => ({ label, ...v }));
+}
+
+/** -1 = largest first (default), 1 = smallest first, for "lowest"/"fewest". */
+function sortDirection(raw: unknown): 1 | -1 {
+  return Number(raw) > 0 ? 1 : -1;
 }
 
 // ── Execution ───────────────────────────────────────────────────────────────
@@ -538,19 +635,36 @@ async function executeSumDuesByPlot(plan: Record<string, any>): Promise<Executed
   };
 }
 
-/** Counts grouped by one low-cardinality field. Pipeline built server-side. */
+/**
+ * Counts grouped by one field. Pipeline built server-side.
+ *
+ * Grouping is by a field on the collection (`groupBy`) or by an attribute of the
+ * related plot (`plotGroupBy`) — see foldPlotGroups for why the second case is
+ * folded in memory instead of joined.
+ */
 async function executeGroupCount(rawPlan: Record<string, any>): Promise<Executed> {
   const collection = validateCollection(rawPlan.collection);
   const plan = normalisePlan(collection, rawPlan);
-  const groupable = GROUPABLE[collection];
-  if (!groupable) {
-    throw new AiQueryError(`Grouping is not supported on ${collection}.`);
-  }
-  const groupBy = String(plan.groupBy || '');
-  if (!groupable.includes(groupBy)) {
-    throw new AiQueryError(
-      `Cannot group ${collection} by "${groupBy}". Available: ${groupable.join(', ')}.`,
-    );
+  const plotGroupBy = validatePlotGroupBy(collection, plan.plotGroupBy);
+
+  let groupBy = '';
+  if (!plotGroupBy) {
+    const groupable = GROUPABLE[collection];
+    if (!groupable) {
+      throw new AiQueryError(
+        `Grouping is not supported on ${collection}.` +
+          (PLOT_REF[collection] ? ` Use plotGroupBy (${PLOT_GROUPABLE.join(', ')}).` : ''),
+      );
+    }
+    groupBy = String(plan.groupBy || '');
+    if (!groupable.includes(groupBy)) {
+      throw new AiQueryError(
+        `Cannot group ${collection} by "${groupBy}". Available: ${groupable.join(', ')}` +
+          (PLOT_REF[collection]
+            ? `, or plotGroupBy: ${PLOT_GROUPABLE.join(', ')}.`
+            : '.'),
+      );
+    }
   }
 
   const fields = FIELDS[collection];
@@ -558,20 +672,42 @@ async function executeGroupCount(rawPlan: Record<string, any>): Promise<Executed
   const join = await resolvePlotFilter(collection, plan.plotFilter);
   const match = join ? { $and: [filter, join] } : filter;
   const limit = clampLimit(plan.limit);
+  const sortDir = sortDirection(plan.sortDir);
 
   const Model: any = COLLECTIONS[collection];
-  const grouped: any[] = await Model.aggregate([
+  const refField = PLOT_REF[collection];
+  const groupKey = plotGroupBy ? `$${refField}` : `$${groupBy}`;
+
+  const buckets: any[] = await Model.aggregate([
     ...(Object.keys(match).length ? [{ $match: match }] : []),
-    { $group: { _id: `$${groupBy}`, count: { $sum: 1 } } },
-    { $sort: { count: -1 } },
-    { $limit: limit },
+    { $group: { _id: groupKey, count: { $sum: 1 } } },
+    // A plot-grouped query must keep every per-plot bucket to fold correctly;
+    // only a direct group can be sorted and cut in the pipeline.
+    ...(plotGroupBy ? [] : [{ $sort: { count: sortDir } }, { $limit: limit }]),
   ]).option({ maxTimeMS: QUERY_TIMEOUT_MS });
 
+  if (!plotGroupBy) {
+    return {
+      rows: buckets.map((g) => ({ [groupBy]: g._id ?? '—', count: g.count })),
+      plan: { op: 'groupCount', collection, groupBy, filter: match, sortDir, limit },
+      truncated: false,
+      rowCount: buckets.length,
+    };
+  }
+
+  const labels = await buildPlotLabelMap(plotGroupBy, join, refField!);
+  const folded = foldPlotGroups(buckets as any[], labels, plotGroupBy, !join)
+    .sort((a, b) => (a.count - b.count) * sortDir)
+    .slice(0, limit);
+
   return {
-    rows: grouped.map((g) => ({ [groupBy]: g._id ?? '—', count: g.count })),
-    plan: { op: 'groupCount', collection, groupBy, filter: match, limit },
+    rows: folded.map((g) => ({ [plotGroupBy]: g.label, count: g.count })),
+    plan: {
+      op: 'groupCount', collection, plotGroupBy, filter: match, sortDir, limit,
+      zeroFilled: !join,
+    },
     truncated: false,
-    rowCount: grouped.length,
+    rowCount: folded.length,
   };
 }
 
@@ -601,14 +737,20 @@ async function executeSumAmount(rawPlan: Record<string, any>): Promise<Executed>
     );
   }
 
-  // groupBy is optional; when absent we return a single grand total.
+  // Both breakdowns are optional; with neither we return a single grand total.
+  // `plotGroupBy` is what makes "by block" / "by phase" answerable on the cash
+  // book, dues and receipts, none of which carry a block of their own.
+  const plotGroupBy = validatePlotGroupBy(collection, plan.plotGroupBy);
   let groupBy = '';
-  if (plan.groupBy != null && plan.groupBy !== '') {
+  if (!plotGroupBy && plan.groupBy != null && plan.groupBy !== '') {
     const groupable = GROUPABLE[collection] || [];
     groupBy = String(plan.groupBy);
     if (!groupable.includes(groupBy)) {
       throw new AiQueryError(
-        `Cannot group ${collection} by "${groupBy}". Available: ${groupable.join(', ') || 'none'}.`,
+        `Cannot group ${collection} by "${groupBy}". Available: ${groupable.join(', ') || 'none'}` +
+          (PLOT_REF[collection]
+            ? `, or plotGroupBy: ${PLOT_GROUPABLE.join(', ')}.`
+            : '.'),
       );
     }
   }
@@ -618,20 +760,47 @@ async function executeSumAmount(rawPlan: Record<string, any>): Promise<Executed>
   const join = await resolvePlotFilter(collection, plan.plotFilter);
   const match = join ? { $and: [filter, join] } : filter;
   const limit = clampLimit(plan.limit);
+  const sortDir = sortDirection(plan.sortDir);
 
   const Model: any = COLLECTIONS[collection];
+  const refField = PLOT_REF[collection];
+  const groupKey = plotGroupBy ? `$${refField}` : groupBy ? `$${groupBy}` : null;
+
   const grouped: any[] = await Model.aggregate([
     ...(Object.keys(match).length ? [{ $match: match }] : []),
     {
       $group: {
-        _id: groupBy ? `$${groupBy}` : null,
+        _id: groupKey,
         total: { $sum: `$${field}` },
         count: { $sum: 1 },
       },
     },
-    { $sort: { total: -1 } },
-    { $limit: groupBy ? limit : 1 },
+    // Plot-grouped queries are sorted after folding; the rest can be cut here.
+    ...(plotGroupBy
+      ? []
+      : [{ $sort: { total: sortDir } }, { $limit: groupBy ? limit : 1 }]),
   ]).option({ maxTimeMS: QUERY_TIMEOUT_MS });
+
+  if (plotGroupBy) {
+    const labels = await buildPlotLabelMap(plotGroupBy, join, refField!);
+    const folded = foldPlotGroups(grouped as any[], labels, plotGroupBy, !join)
+      .sort((a, b) => (a.total - b.total) * sortDir)
+      .slice(0, limit);
+
+    return {
+      rows: folded.map((g) => ({
+        [plotGroupBy]: g.label,
+        [`total ${field}`]: g.total,
+        records: g.count,
+      })),
+      plan: {
+        op: 'sumAmount', collection, field, plotGroupBy, filter: match, sortDir, limit,
+        zeroFilled: !join,
+      },
+      truncated: false,
+      rowCount: folded.length,
+    };
+  }
 
   const rows = groupBy
     ? grouped.map((g) => ({ [groupBy]: g._id ?? '—', [`total ${field}`]: g.total, records: g.count }))
@@ -639,7 +808,10 @@ async function executeSumAmount(rawPlan: Record<string, any>): Promise<Executed>
 
   return {
     rows,
-    plan: { op: 'sumAmount', collection, field, groupBy: groupBy || null, filter: match, limit },
+    plan: {
+      op: 'sumAmount', collection, field, groupBy: groupBy || null,
+      filter: match, sortDir, limit,
+    },
     truncated: false,
     rowCount: rows.length,
   };
@@ -763,6 +935,27 @@ export async function answerQuestion(question: string): Promise<AiQueryResult> {
     const plan = parsed.plan;
 
     if (parsed.unsupported && !plan) {
+      // Models over-use this verdict, most often claiming a question needs a
+      // join ("blocks aren't on collections") when plotFilter/plotGroupBy
+      // already cover exactly that. Push back once before giving up — the same
+      // one-retry budget the validator errors use.
+      if (attempt === 0) {
+        messages.push(
+          { role: 'assistant', content: JSON.stringify({ unsupported: parsed.unsupported }) },
+          {
+            role: 'user',
+            content:
+              'Reconsider — that is very likely answerable. Cross-collection questions ' +
+              'ARE supported: `plotFilter` filters by the related plot and `plotGroupBy` ' +
+              '("block", "phase", "allotmentStatus") groups by it, so per-block or ' +
+              'per-phase totals of collections/payments/receipts work without any join. ' +
+              'Use "sortDir": 1 for lowest/least and -1 for highest/most. Return a plan; ' +
+              'only repeat "unsupported" if no field in the schema holds the information ' +
+              'at all, and if you do, name the specific missing field.',
+          },
+        );
+        continue;
+      }
       throw new AiQueryError(
         `That can't be answered from this database: ${String(parsed.unsupported).slice(0, 300)}`,
         422,

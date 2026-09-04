@@ -57,9 +57,12 @@ allowlist, anything new is blocked by default. `FORBIDDEN_OPERATORS` names
 `$where`, `$function`, `$accumulator`, `$expr`, `$out`, `$merge`, `$lookup`,
 and the update operators explicitly as defence in depth.
 
-**No LLM-authored joins.** Cross-collection filtering happens only through
-`plotFilter`, which we resolve ourselves into `{ plot: { $in: [ids] } }`,
-capped at 5,000 ids. No `$lookup`, no `$graphLookup`, no `$expr`.
+**No LLM-authored joins.** Cross-collection work happens only through two
+server-resolved mechanisms: `plotFilter`, which we turn into
+`{ plot: { $in: [ids] } }` (capped at 5,000 ids), and `plotGroupBy`, which folds
+per-plot aggregation buckets up by block/phase/allotment status using a plot
+`_id` → label map we build ourselves. No `$lookup`, no `$graphLookup`, no
+`$expr`.
 
 **Bounded cost.** Results clamp to 200 rows (default 25), filters to 6 levels
 of nesting, `$regex` patterns to 100 characters, and every query carries
@@ -79,8 +82,9 @@ are handled without loosening any allowlist:
    validation — `plotFilter` supplied on `plots` is merged into `filter`, and
    `plot.block` style dotted ref paths are lifted into `plotFilter`. Everything
    still passes through `validateFilter` afterwards.
-2. **One automatic retry.** If validation rejects the plan, the error is fed back
-   to the model with a correction hint and it tries once more. This fixes new
+2. **One automatic retry.** If validation rejects the plan — or the model claims
+   the question is `unsupported` — the reason is fed back with a correction hint
+   and it tries once more. This fixes new
    mistake shapes generically instead of needing a code change each time. Worst
    case is therefore three Groq calls per question (plan, retry, summary).
 3. **Sort and projection degrade gracefully.** Unknown fields there are dropped,
@@ -177,8 +181,11 @@ These are properties of the actual database, not the models:
 | `find` | Read documents from one collection, with optional `plotFilter` join and `populatePlot`. |
 | `count` | How many documents match. |
 | `sumDuesByPlot` | Dues summed **across years** per plot, joined to owner details. |
-| `groupCount` | Counts grouped by one low-cardinality field (e.g. plots per block). |
-| `sumAmount` | Totals a money field, optionally broken down by one field. |
+| `groupCount` | Counts grouped by one field of the collection (`groupBy`) or of the related plot (`plotGroupBy`). |
+| `sumAmount` | Totals a money field, optionally broken down by `groupBy` or `plotGroupBy`. |
+
+Both grouped operations take `sortDir`: `-1` (largest first, the default) or `1`
+for a "lowest / least / fewest" question.
 
 `sumAmount` exists because "how much did we spend last year" was previously
 unanswerable: `find` would return rows for the admin to add up by hand, and
@@ -186,6 +193,42 @@ unanswerable: `find` would return rows for the admin to add up by hand, and
 separate allowlist (`SUMMABLE`) from `FIELDS`, because totalling a year, an
 ordinal, or an `_id` is never a sensible answer and would produce confident
 nonsense.
+
+## Grouping by block or phase — `plotGroupBy`
+
+`collections` (the cash book), `payments` and `receipts` store no block, phase or
+owner of their own; those live on the related plot. So "which block has the
+lowest collection in 2026" has no field on the collection to group by, and
+`$lookup` is forbidden. Before `plotGroupBy` existed the planner correctly
+concluded it could not be done and answered *"joins are not supported"* — a real
+question about data we hold, refused.
+
+`plotGroupBy` (`block`, `phase`, `allotmentStatus`) closes that gap:
+
+1. Aggregate grouped by the plot ref, giving one bucket per plot.
+2. Build a plot `_id` → label map (a few hundred rows — cheaper than a join).
+3. Fold the buckets into per-label totals in memory, then sort and cut.
+
+Two details that matter for correctness:
+
+- **`phase` is derived from the plot's block** via `BLOCK_PHASE_MAP`, not read
+  off `plots.phase`, so phase grouping is immune to the unmigrated legacy phase
+  values that the rest of the prompt has to work around.
+- **Missing buckets are zero-filled** from `ALL_BLOCKS` / `ALL_PHASES` whenever no
+  `plotFilter` narrowed the question. Without this, a block that collected
+  nothing produces no aggregation row, and "which block collected least" would
+  confidently name the smallest *non-zero* block. The plan echoes
+  `zeroFilled: true` so the admin can see it happened.
+
+`sortDir` exists for the same reason: the pipeline used to hardcode
+`{ total: -1 }`, so a "lowest" question was answered with a largest-first list.
+
+Two planner repairs support this: `normalisePlan` moves a `groupBy` that names a
+plot attribute (`block`, `plot.block`, `phase`) into `plotGroupBy`, and an
+`unsupported` verdict now gets **one push-back** reminding the model that
+`plotFilter`/`plotGroupBy` cover cross-collection questions, before it is
+reported to the admin. Models over-use that verdict, and refusing a question we
+can actually answer is the worst failure this feature has.
 
 ## Schema quirks the prompt has to teach the model
 

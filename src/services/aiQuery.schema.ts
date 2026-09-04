@@ -35,6 +35,7 @@ import {
   MONTHS,
   YEARS_WITH_DATA,
   PHASE_BLOCK_MAP,
+  BLOCK_PHASE_MAP,
 } from '../config/constants';
 
 /**
@@ -151,6 +152,39 @@ export const GROUPABLE: Partial<Record<CollectionName, string[]>> = {
   expensecategories: ['isActive'],
   notices: ['type', 'language', 'year', 'yearTo'],
 };
+
+/**
+ * Plot attributes a payments/receipts/collections query may be grouped BY, via
+ * `plotGroupBy`. This is the group-by counterpart of `plotFilter`: the cash book
+ * carries no block of its own, so "which block collected least" is only
+ * answerable by folding rows up through their plot. Resolved in the service from
+ * a plot _id -> value map, never a $lookup.
+ *
+ * `phase` is derived from the plot's block through BLOCK_PHASE_MAP rather than
+ * read off the plot, because stored phase values are unmigrated legacy strings.
+ */
+export const PLOT_GROUPABLE = ['block', 'phase', 'allotmentStatus'] as const;
+
+export type PlotGroupField = (typeof PLOT_GROUPABLE)[number];
+
+/** Derive the grouping label for one plot, phase coming from its block. */
+export function plotGroupValue(plot: any, field: string): string {
+  if (field === 'phase') return BLOCK_PHASE_MAP[String(plot?.block)] || 'Unknown';
+  const v = plot?.[field];
+  return v === undefined || v === null || v === '' ? 'Unknown' : String(v);
+}
+
+/**
+ * The complete set of buckets for a plot grouping, where one exists. Needed
+ * because a "lowest"/"least" question is wrong without it: a block that
+ * collected nothing produces no aggregation row at all, so the true minimum
+ * would be silently skipped in favour of the smallest non-zero block.
+ */
+export function plotGroupDomain(field: string): string[] | null {
+  if (field === 'block') return [...ALL_BLOCKS];
+  if (field === 'phase') return [...ALL_PHASES];
+  return null;
+}
 
 /**
  * Numeric fields a `sumAmount` may total. Separate from FIELDS because summing a
@@ -326,15 +360,24 @@ strings. So plotFilter does not work here.
    OMIT minTotalRemaining/maxTotalRemaining entirely when there is no such
    bound. Never send 0 to mean "no limit" — 0 means literally zero rupees.
 
-4. **groupCount** — counts grouped by one low-cardinality field.
-   { "op": "groupCount", "collection": "plots", "groupBy": "block", "filter": {...}, "limit": 25 }
+4. **groupCount** — counts grouped by one field.
+   { "op": "groupCount", "collection": "plots", "groupBy": "block", "filter": {...},
+     "sortDir": -1, "limit": 25 }
+   Group by EITHER "groupBy" (a field on the collection itself) OR "plotGroupBy"
+   (an attribute of the related plot — see the plot grouping rule below).
+   - "how many payment records per block" -> { "op": "groupCount",
+       "collection": "payments", "plotGroupBy": "block", "sortDir": -1 }
+   - "how many cash entries per phase in 2026" -> { "op": "groupCount",
+       "collection": "collections", "plotGroupBy": "phase",
+       "filter": { "bookYear": 2026, "isVoided": false, "countInCashBook": true } }
 
 5. **sumAmount** — TOTAL a money field, optionally broken down by one field.
    Use this for every "how much" question about income or spending; never fetch
    rows and expect the admin to add them up.
    { "op": "sumAmount", "collection": "expenses", "field": "amount",
-     "filter": {...}, "groupBy": "categoryName", "plotFilter": {...}, "limit": 25 }
-   OMIT groupBy for a single grand total. Summable fields:
+     "filter": {...}, "groupBy": "categoryName", "plotGroupBy": null,
+     "plotFilter": {...}, "sortDir": -1, "limit": 25 }
+   OMIT groupBy/plotGroupBy for a single grand total. Summable fields:
    - collections: amount, arrearsAmount, currentAmount, advanceAmount, unallocatedAmount
    - expenses: amount
    - payments: totalReceived, totalDue, remaining
@@ -347,6 +390,39 @@ strings. So plotFilter does not work here.
    - "how much did we collect in 2026" -> { "op": "sumAmount",
        "collection": "collections", "field": "amount",
        "filter": { "bookYear": 2026, "isVoided": false, "countInCashBook": true } }
+   - "which block has the lowest collection in 2026" -> { "op": "sumAmount",
+       "collection": "collections", "field": "amount", "plotGroupBy": "block",
+       "sortDir": 1, "filter": { "bookYear": 2026, "isVoided": false,
+       "countInCashBook": true } }
+   - "which block owes the most in 2025" -> { "op": "sumAmount",
+       "collection": "payments", "field": "remaining", "plotGroupBy": "block",
+       "sortDir": -1, "filter": { "year": 2025 } }
+
+### sortDir — "highest" vs "lowest"
+Both groupCount and sumAmount accept "sortDir": -1 (largest first, the default)
+or 1 (smallest first). ALWAYS send "sortDir": 1 when the question asks for the
+lowest / least / smallest / fewest / worst-performing, and leave it at -1 for
+highest / most / top / best. Never answer a "lowest" question with a
+largest-first list.
+
+### Plot grouping rule — how to break any question down by block or phase
+\`collections\`, \`payments\` and \`receipts\` do not store a block, phase or owner of
+their own; those live on the related plot. Set "plotGroupBy" to fold the rows up
+through their plot. It is accepted by **both groupCount and sumAmount**, on
+collections, payments and receipts, and takes exactly one of:
+block, phase, allotmentStatus.
+Counting per block and totalling per block are equally supported — grouping a
+count by a plot attribute is NOT a limitation of this API.
+- "plotGroupBy": "phase" is resolved through each plot's BLOCK, so it is safe
+  despite the unmigrated phase field — you do NOT need to expand phases into
+  blocks yourself when grouping.
+- Blocks or phases with no matching rows come back with a total of 0 (unless a
+  plotFilter narrowed the question), so a "lowest" answer is not skewed by a
+  block that collected nothing.
+- Use "groupBy" for a field on the collection itself and "plotGroupBy" for a
+  plot attribute — never both in one plan.
+So "which block collected the least / which phase pays best / dues by block" are
+all ANSWERABLE. Never call such a question unsupported for lack of joins.
 
 ## Rules
 
@@ -387,6 +463,14 @@ or "this year" and returns nothing, that is a legitimate empty result.
   which you chose, so the admin is told what was actually measured.
 - Default limit 25, maximum ${MAX_LIMIT}. Prefer isActive: true on plots unless
   asked otherwise.
+
+### Before answering "unsupported"
+Set "unsupported" only when NO field in the schema above carries the information
+(e.g. plot type, which is on the site plan only). It is NOT a reason to give up
+that a question spans two collections: \`plotFilter\` filters by plot attributes
+and \`plotGroupBy\` groups by them, so any question about blocks, phases, owners
+or plot status combined with money, dues or receipts can be answered. Prefer the
+closest answerable query plus a "reinterpreted" note over refusing.
 
 Return ONLY JSON, with this envelope:
 { "plan": { ...one operation above... },
@@ -447,6 +531,7 @@ export function needsLayoutFacts(question: string): boolean {
 export const CAPABILITIES = {
   collections: Object.keys(COLLECTIONS),
   operations: ['find', 'count', 'sumDuesByPlot', 'groupCount', 'sumAmount'],
+  plotGroupBy: [...PLOT_GROUPABLE],
   maxLimit: MAX_LIMIT,
   readOnly: true,
 };
