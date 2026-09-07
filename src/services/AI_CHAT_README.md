@@ -119,6 +119,29 @@ in `collections` and in `year 2015` in `payments`. So "how much did we collect
 in <period>" is a `collections` question, while "which months are unpaid" is a
 `payments` question. The prompt states this explicitly with worked examples.
 
+### Which collection a "who paid" question belongs to
+
+The distinction above is about *meaning*, but there is a second, practical fact:
+**the cash book is only as complete as the entries an admin has typed into it,
+and in live data it is near-empty** (currently nothing but voided rows), while
+the dues ledger holds real receipts — PKR 241,500 against 2026 months alone.
+
+So routing is now split by what the question is really after:
+
+| Question | Collection | Field |
+|---|---|---|
+| "top 5 paying blocks in 2026", "who paid most for <year>", "how much has been received for <year>" | `payments` | `totalReceived` |
+| "how much cash arrived in March", "by payment method", "what did we bank" | `collections` | `amount` |
+
+And because the planner can still pick the cash book, `duesLedgerFallbackPlan`
+retries a cash-book total that matched **nothing** against
+`payments.totalReceived` for the same year, returning a `note` that says so —
+the two measure different things, so the substitution is stated, never silent.
+It declines to substitute where no honest equivalent exists: a `bookMonth`
+filter (the ledger's months are twelve separate columns, not a summable field),
+or any breakdown by a cash-book-only field such as `method` or `entryType`.
+Those still answer "no records matched", which for them is the truth.
+
 Two filters are near-mandatory on `collections`, and the prompt says so:
 `isVoided: false` (reversed mistakes) and `countInCashBook: true` (historical
 backfill for money collected *and spent* years ago — including it inflates

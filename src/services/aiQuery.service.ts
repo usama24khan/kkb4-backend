@@ -514,6 +514,8 @@ interface Executed {
    * for a period where no collection was ever recorded.
    */
   matched?: number;
+  /** Set when execution itself substituted a different source — see the note. */
+  note?: string;
 }
 
 async function executeFind(rawPlan: Record<string, any>): Promise<Executed> {
@@ -749,6 +751,68 @@ async function executeGroupCount(rawPlan: Record<string, any>): Promise<Executed
 }
 
 /**
+ * "Which block paid the most in 2026" has two homes in this schema, and only one
+ * of them is populated in practice.
+ *
+ * The prompt sends "how much came in during <period>" to the cash book, which is
+ * right in principle — but the cash book is only as complete as the entries an
+ * admin has typed into it, and in live data it is near-empty (currently nothing
+ * but voided rows), while the dues ledger holds PKR 241,500 of receipts against
+ * 2026 months. Answering "no records" there is technically true and practically
+ * wrong: the money is recorded, just in the other collection.
+ *
+ * So when a cash-book total matches NOTHING, retry it against the dues ledger —
+ * `payments.totalReceived` for the same year — and say so in a note. The two
+ * measure different things (when cash arrived vs. which year's dues it cleared),
+ * which is exactly why the substitution has to be visible rather than silent.
+ *
+ * Returns null when no honest equivalent exists: a `bookMonth` filter has no
+ * counterpart to sum (the ledger's months are twelve separate columns), and a
+ * question about a specific payment method or entry type is about the cash book
+ * itself, not about money received.
+ */
+function duesLedgerFallbackPlan(
+  plan: Record<string, any>,
+  filter: Record<string, any>,
+  field: string,
+): { plan: Record<string, any>; note: string } | null {
+  if (field !== 'amount') return null;
+  const keys = Object.keys(filter);
+  const cashBookOnly = ['bookMonth', 'bookOrdinal', 'method', 'entryType', 'receivedDate',
+    'arrearsAmount', 'currentAmount', 'advanceAmount', 'unallocatedAmount', 'receiptRef'];
+  if (keys.some((k) => cashBookOnly.includes(k))) return null;
+  // Anything nested ($and/$or) is too varied to translate field by field.
+  if (keys.some((k) => k.startsWith('$'))) return null;
+
+  const bookYear = filter.bookYear;
+  if (bookYear !== undefined && typeof bookYear !== 'number') return null;
+
+  // A breakdown by a cash-book-only field (method, entry type, book month) has
+  // no counterpart in the ledger, and answering it with an ungrouped total would
+  // silently drop the part of the question that was actually asked.
+  if (plan.groupBy && plan.groupBy !== 'bookYear') return null;
+
+  const period = bookYear === undefined ? 'any year' : String(bookYear);
+  return {
+    plan: {
+      op: 'sumAmount',
+      collection: 'payments',
+      field: 'totalReceived',
+      ...(bookYear === undefined ? {} : { filter: { year: bookYear } }),
+      ...(plan.plotGroupBy ? { plotGroupBy: plan.plotGroupBy } : {}),
+      ...(plan.groupBy === 'bookYear' ? { groupBy: 'year' } : {}),
+      ...(plan.plotFilter ? { plotFilter: plan.plotFilter } : {}),
+      sortDir: plan.sortDir,
+      limit: plan.limit,
+    },
+    note:
+      `The cash book has no counted entries for ${period}, so this was answered from the ` +
+      'dues ledger instead — money recorded against that year\'s months ' +
+      '(payments.totalReceived), rather than cash-book entries by the date it arrived.',
+  };
+}
+
+/**
  * Total a money field, optionally broken down by one field. Pipeline built
  * server-side from validated scalars — the model supplies only names and filters.
  *
@@ -824,6 +888,14 @@ async function executeSumAmount(rawPlan: Record<string, any>): Promise<Executed>
       .sort((a, b) => (a.total - b.total) * sortDir)
       .slice(0, limit);
 
+    if (collection === 'collections' && folded.every((g) => g.count === 0)) {
+      const alt = duesLedgerFallbackPlan(plan, filter, field);
+      if (alt) {
+        const retried = await executeSumAmount(alt.plan);
+        if ((retried.matched ?? retried.rowCount) > 0) return { ...retried, note: alt.note };
+      }
+    }
+
     return {
       rows: folded.map((g) => ({
         [plotGroupBy]: g.label,
@@ -841,6 +913,15 @@ async function executeSumAmount(rawPlan: Record<string, any>): Promise<Executed>
     };
   }
 
+  const matched = grouped.reduce((n, g) => n + (g.count || 0), 0);
+  if (collection === 'collections' && matched === 0) {
+    const alt = duesLedgerFallbackPlan(plan, filter, field);
+    if (alt) {
+      const retried = await executeSumAmount(alt.plan);
+      if ((retried.matched ?? retried.rowCount) > 0) return { ...retried, note: alt.note };
+    }
+  }
+
   const rows = groupBy
     ? grouped.map((g) => ({ [groupBy]: g._id ?? '—', [`total ${field}`]: g.total, records: g.count }))
     : [{ [`total ${field}`]: grouped[0]?.total ?? 0, records: grouped[0]?.count ?? 0 }];
@@ -855,7 +936,7 @@ async function executeSumAmount(rawPlan: Record<string, any>): Promise<Executed>
     rowCount: rows.length,
     // A grand total always produces one row, so rowCount alone can't tell an
     // admin apart "we collected nothing" from "nothing was ever recorded".
-    matched: grouped.reduce((n, g) => n + (g.count || 0), 0),
+    matched,
   };
 }
 
@@ -1020,7 +1101,9 @@ export async function answerQuestion(question: string): Promise<AiQueryResult> {
               `sumDuesByPlot, groupCount, sumAmount.`,
           );
       }
-      reinterpreted = parsed.reinterpreted;
+      // An execution-level substitution (the dues-ledger fallback) matters more
+      // to the admin than the planner's own paraphrase, so it wins the slot.
+      reinterpreted = executed?.note ?? parsed.reinterpreted;
     } catch (err) {
       // Only plan-shape problems are worth retrying; infrastructure errors are not.
       if (!(err instanceof AiQueryError) || err.status !== 400 || attempt === 1) throw err;

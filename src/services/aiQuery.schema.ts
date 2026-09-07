@@ -287,8 +287,17 @@ Do not confuse this with \`payments\`. The distinction matters:
 - \`collections\` records **when the cash physically arrived**.
 A payment handed over in March 2026 clearing 2015 dues sits in bookYear 2026 /
 bookMonth 3 here, and in year 2015 in \`payments\`. So:
-  * "how much did we collect in <period>" -> collections, on bookYear/bookMonth
+  * "how much cash arrived in <period>" / cash book / by payment method /
+    "what did we bank in March" -> collections, on bookYear/bookMonth
   * "which months are unpaid for this plot" -> payments
+  * **"which block/plot/owner PAID the most for <year>", "top paying blocks in
+    <year>", "how much has been received for <year>" -> payments, summing
+    \`totalReceived\`** — that is the dues ledger, which is the complete record of
+    money received against a year. The cash book is only as complete as the
+    entries an admin has typed into it and is currently near-empty, so routing a
+    "who paid most" question there returns zero and tells the admin nothing.
+    Reach for collections only when the question is genuinely about WHEN cash
+    arrived or HOW it was paid.
 - plot (ObjectId -> plots), amount (number), method ("cash"|"bank"|"online"|"cheque"|"other")
 - receivedDate (date); bookYear (number), bookMonth (number 1-12) — the period
   the cash landed in; bookOrdinal (number) = bookYear*12 + bookMonth, for ranges
@@ -397,6 +406,10 @@ strings. So plotFilter does not work here.
    - "which block owes the most in 2025" -> { "op": "sumAmount",
        "collection": "payments", "field": "remaining", "plotGroupBy": "block",
        "sortDir": -1, "filter": { "year": 2025 } }
+   - "top 5 paying blocks in 2026" -> { "op": "sumAmount",
+       "collection": "payments", "field": "totalReceived", "plotGroupBy": "block",
+       "sortDir": -1, "limit": 5, "filter": { "year": 2026 } }
+     (\`payments.totalReceived\`, NOT the cash book — see the collections section.)
 
 ### sortDir — "highest" vs "lowest"
 Both groupCount and sumAmount accept "sortDir": -1 (largest first, the default)
