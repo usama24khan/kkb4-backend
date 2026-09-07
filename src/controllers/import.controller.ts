@@ -49,10 +49,14 @@ export const importExcel = async (req: AuthRequest, res: Response): Promise<void
 
         if ((plot as any).wasNew !== false) plotsCreated++; else plotsUpdated++;
 
-        await PaymentService.upsert(plot._id.toString(), entry.year, {
-          mcRate: entry.mcRate,
-          payments: entry.payments as any,
-        });
+        // 'import' keeps this out of the payment activity log — a spreadsheet
+        // backfill is not money arriving today.
+        await PaymentService.upsert(
+          plot._id.toString(),
+          entry.year,
+          { mcRate: entry.mcRate, payments: entry.payments as any },
+          'import',
+        );
         paymentsCreated++;
       } catch (err: any) {
         errors.push(`${entry.plotBlock} (${entry.year}): ${err.message}`);

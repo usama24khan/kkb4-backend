@@ -4,6 +4,8 @@ import Collection from '../models/Collection';
 import Receipt from '../models/Receipt';
 import { MONTHS, getMcRateForYear, getChargeForYear } from '../config/constants';
 import { Types } from 'mongoose';
+import { PaymentEventService, type MonthChange } from './paymentEvent.service';
+import type { PaymentEventSource } from '../models/PaymentEvent';
 
 /**
  * Recompute totalReceived/totalDue/remaining from the current month fields.
@@ -136,6 +138,7 @@ export class PaymentService {
     const payment = await Payment.findById(paymentId);
     if (!payment) return null;
 
+    const changes: MonthChange[] = [];
     if (data.payments) {
       const backed = await ledgerBackedMonthsFor(payment.plot.toString(), payment.year);
       const refused: string[] = [];
@@ -149,6 +152,7 @@ export class PaymentService {
           continue;
         }
         (payment.payments as any)[month] = incoming;
+        changes.push({ month, from: before, to: after });
       }
       if (refused.length) throw new LedgerBackedError(refused, payment.year);
     }
@@ -167,7 +171,11 @@ export class PaymentService {
     payment.totalDue = payment.mcRate * 12;
     payment.remaining = payment.totalDue - payment.totalReceived;
 
-    return payment.save();
+    const saved = await payment.save();
+    await PaymentEventService.record({
+      plotId: payment.plot.toString(), year: payment.year, changes, source: 'record',
+    });
+    return saved;
   }
 
   static async deletePayment(paymentId: string) {
@@ -224,6 +232,15 @@ export class PaymentService {
     recalcTotals(payment);
 
     const saved = await payment.save();
+    await PaymentEventService.record({
+      plotId: payment.plot.toString(),
+      year: payment.year,
+      changes: [{ month, from: Number(currentAmount) || 0, to: 0 }],
+      source: 'record',
+      type: 'void',
+      recordedBy: adminId ?? null,
+      note: reason || '',
+    });
     return { payment: saved, voidedAmount: currentAmount };
   }
 
@@ -264,14 +281,34 @@ export class PaymentService {
     recalcTotals(payment);
 
     const saved = await payment.save();
+    await PaymentEventService.record({
+      plotId: payment.plot.toString(),
+      year: payment.year,
+      changes: [{ month, from: 0, to: Number(entry.amount) || 0 }],
+      source: 'record',
+      type: 'restore',
+      recordedBy: adminId ?? null,
+    });
     return { payment: saved, restoredAmount: entry.amount };
   }
 
-  static async upsert(plotId: string, year: number, data: Partial<IPayment>) {
+  /**
+   * `source` decides whether the change reaches the activity log. The Excel
+   * import passes 'import' and is deliberately not logged: a backfill of a
+   * decade of records would otherwise read as thousands of payments arriving
+   * the moment someone pressed Import.
+   */
+  static async upsert(
+    plotId: string,
+    year: number,
+    data: Partial<IPayment>,
+    source: PaymentEventSource = 'record',
+  ) {
     const existing = await Payment.findOne({ plot: plotId, year });
     const defaultRate = getMcRateForYear(year);
 
     if (existing) {
+      const changes: MonthChange[] = [];
       if (data.payments) {
         const backed = await ledgerBackedMonthsFor(plotId, year);
         const refused: string[] = [];
@@ -285,6 +322,7 @@ export class PaymentService {
             continue;
           }
           (existing.payments as any)[month] = incoming;
+          changes.push({ month, from: before, to: after });
         }
         if (refused.length) throw new LedgerBackedError(refused, year);
       }
@@ -302,7 +340,11 @@ export class PaymentService {
       existing.totalDue = existing.mcRate * 12;
       existing.remaining = existing.totalDue - existing.totalReceived;
 
-      return existing.save();
+      const saved = await existing.save();
+      if (source !== 'import') {
+        await PaymentEventService.record({ plotId, year, changes, source });
+      }
+      return saved;
     }
 
     const payment = new Payment({
@@ -313,7 +355,22 @@ export class PaymentService {
       note: data.note || '',
     });
 
-    return payment.save();
+    const created = await payment.save();
+    if (source !== 'import') {
+      // A brand-new year created with months already filled in is still money
+      // being recorded, so every non-empty month counts as a payment.
+      await PaymentEventService.record({
+        plotId,
+        year,
+        changes: MONTHS.map((month) => ({
+          month,
+          from: 0,
+          to: Number((data.payments as any)?.[month]) || 0,
+        })),
+        source,
+      });
+    }
+    return created;
   }
 
   /**
@@ -377,6 +434,12 @@ export class PaymentService {
       // totalDue and remaining are derived on save from the rate schedule.
 
       const saved = await payment.save();
+      if (increase !== 0) {
+        await PaymentEventService.record({
+          plotId: entry.plotId, year, source: 'bulk',
+          changes: [{ month, from: before, to: next }],
+        });
+      }
       results.push(saved);
     }
 
@@ -439,6 +502,11 @@ export class PaymentService {
 
       recalcTotals(payment);
       results.push(await payment.save());
+      if (moved.length) {
+        await PaymentEventService.record({
+          plotId: entry.plotId, year, source: 'grid', changes: moved,
+        });
+      }
     }
 
     return { results, deltas, blocked, movements };

@@ -42,6 +42,7 @@ import {
   toBookPeriod,
 } from '../utils/financePeriod';
 import { generateReceiptPDF } from '../utils/receiptPdfGenerator';
+import { PaymentEventService } from './paymentEvent.service';
 
 /** How many months ahead an owner may pay in advance. */
 export const MAX_ADVANCE_MONTHS = 36;
@@ -381,7 +382,13 @@ function validateAllocations(allocations: Array<{ year: number; month: string; a
 async function applyAllocations(
   plotId: string,
   allocations: IAllocation[],
-  sign: 1 | -1
+  sign: 1 | -1,
+  /**
+   * Activity-log context. Money recorded through Accounts is the case the log
+   * most wants to show — it has a real date and a receipt behind it — so the
+   * cash entry's own `receivedDate` is used rather than "now".
+   */
+  log?: { paidAt?: Date; collectionRef?: string | null; recordedBy?: string | null; reversal?: boolean },
 ): Promise<void> {
   if (!allocations.length) return;
 
@@ -406,6 +413,7 @@ async function applyAllocations(
       });
     }
 
+    const changes: Array<{ month: string; from: number; to: number }> = [];
     for (const alloc of list) {
       const key = String(alloc.month).toLowerCase();
       if (!MONTHS.includes(key as any)) continue;
@@ -414,10 +422,24 @@ async function applyAllocations(
       // A cleared month drops back to null rather than 0 so the existing UI
       // (which treats > 0 as paid and null as untouched) stays consistent.
       (payment.payments as any)[key] = next > 0 ? next : null;
+      changes.push({ month: key, from: current, to: next > 0 ? next : 0 });
     }
 
     // The pre-save hook recomputes totalReceived / totalDue / remaining.
     await payment.save();
+
+    if (log) {
+      await PaymentEventService.record({
+        plotId,
+        year,
+        changes,
+        source: 'cashbook',
+        type: log.reversal ? 'void' : 'payment',
+        paidAt: log.paidAt,
+        collectionRef: log.collectionRef ?? null,
+        recordedBy: log.recordedBy ?? null,
+      });
+    }
   }
 }
 
@@ -491,7 +513,16 @@ export async function recordCollection(
   }
 
   const applyToDues = input.applyToDues !== false;
-  if (applyToDues) await applyAllocations(input.plotId, allocations, 1);
+  if (applyToDues) {
+    // collectionRef stays null here: the cash-book row is created below and has
+    // no id yet. Rather than pre-mint one — which would leave the log pointing
+    // at a row that never existed if the create fails — the link is left out.
+    // The date and the plot are what the activity questions actually need.
+    await applyAllocations(input.plotId, allocations, 1, {
+      paidAt: receivedDate,
+      recordedBy: adminId ?? null,
+    });
+  }
 
   let collection: ICollection;
   try {
@@ -511,6 +542,8 @@ export async function recordCollection(
   } catch (err) {
     // Undo the dues we just applied so the owner's balance isn't silently
     // credited for a payment that has no ledger row.
+    // No log entry: this undoes an application whose own log row was written a
+    // moment ago, and a failed save is not activity an admin should see.
     if (applyToDues) await applyAllocations(input.plotId, allocations, -1).catch(() => {});
     throw err;
   }
@@ -588,7 +621,11 @@ export async function voidCollection(
   if (!collection) return null;
   if (collection.isVoided) return collection;
 
-  await applyAllocations(collection.plot.toString(), collection.allocations, -1);
+  await applyAllocations(collection.plot.toString(), collection.allocations, -1, {
+    collectionRef: collection.id,
+    recordedBy: adminId ?? null,
+    reversal: true,
+  });
 
   collection.isVoided = true;
   collection.voidedAt = new Date();

@@ -29,6 +29,7 @@ import Expense from '../models/Expense';
 import ExpenseCategory from '../models/ExpenseCategory';
 import FinanceSettings from '../models/FinanceSettings';
 import Notice from '../models/Notice';
+import PaymentEvent from '../models/PaymentEvent';
 import {
   ALL_BLOCKS,
   ALL_PHASES,
@@ -50,6 +51,7 @@ const PHASE_BLOCK_MAP_FOR_PROMPT: Record<string, string[]> = PHASE_BLOCK_MAP;
 export const COLLECTIONS = {
   plots: Plot,
   payments: Payment,
+  paymentevents: PaymentEvent,
   receipts: Receipt,
   blocks: Block,
   phases: Phase,
@@ -85,6 +87,12 @@ export const FIELDS: Record<CollectionName, string[]> = {
     '_id', 'plot', 'year', 'mcRate', 'totalReceived', 'totalDue', 'remaining',
     'note', 'createdAt', 'updatedAt',
     ...MONTHS.map((m) => `payments.${m}`),
+  ],
+  // The activity log — when each month cell was recorded. `recordedBy` is
+  // omitted like every other admin reference.
+  paymentevents: [
+    '_id', 'plot', 'year', 'month', 'amount', 'balanceAfter', 'paidAt',
+    'type', 'source', 'note', 'createdAt', 'updatedAt',
   ],
   receipts: [
     '_id', 'receiptNumber', 'receiptNumericId', 'year', 'month', 'language',
@@ -139,6 +147,7 @@ export const FIELDS: Record<CollectionName, string[]> = {
  */
 export const PLOT_REF: Partial<Record<CollectionName, string>> = {
   payments: 'plot',
+  paymentevents: 'plot',
   receipts: 'plotRef',
   collections: 'plot',
 };
@@ -147,6 +156,7 @@ export const PLOT_REF: Partial<Record<CollectionName, string>> = {
 export const GROUPABLE: Partial<Record<CollectionName, string[]>> = {
   plots: ['block', 'phase', 'allotmentStatus', 'isActive'],
   payments: ['year', 'mcRate'],
+  paymentevents: ['year', 'month', 'type', 'source'],
   receipts: ['year', 'month', 'blockNo', 'isVerified'],
   complaints: ['status'],
   collections: ['bookYear', 'bookMonth', 'method', 'entryType', 'countInCashBook', 'isVoided'],
@@ -206,6 +216,7 @@ export const SUMMABLE: Partial<Record<CollectionName, string[]>> = {
   ],
   expenses: ['amount'],
   payments: ['totalReceived', 'totalDue', 'remaining'],
+  paymentevents: ['amount'],
   receipts: ['amount'],
   notices: ['totalDue', 'plotCount'],
 };
@@ -282,6 +293,26 @@ export const SCHEMA_PROMPT = `You translate an admin's question about the KKB4 h
   (so a single document's remaining can never exceed 4800)
 - note (string)
 
+### paymentevents — WHEN each payment was recorded (the activity log)
+One row per month cell that changed. The ONLY per-month timestamp, so every
+"recently / today / this week / how many payments were added" question is here.
+- plot (-> plots), year + month ("jan".."dec") — the dues month paid FOR
+- paidAt (date) — when it was recorded; filter and sort on this. Dates go in as
+  "YYYY-MM-DD"
+- amount (number) — the change: + money in, - a correction; balanceAfter (number)
+- type ("payment"|"adjustment"|"void"|"restore") — add { "type": "payment" }
+  unless asked about corrections or reversals
+- source ("grid"|"bulk"|"record"|"cashbook") — cashbook went through Accounts
+**Not backfilled — the log starts when the feature shipped.** An empty answer
+about an earlier period is correct: say the activity was never recorded rather
+than implying nothing was paid.
+- "how many payments were added this month" -> { "op": "count",
+    "collection": "paymentevents",
+    "filter": { "type": "payment", "paidAt": { "$gte": "2026-09-01" } } }
+- "which ones" -> the same as find, "populatePlot": true, "sort": {"paidAt": -1}
+- "how much came in this week / per block" -> sumAmount on amount, same filter,
+  plus "plotGroupBy": "block"
+
 ### receipts — issued payment receipts
 - plotRef (ObjectId -> plots), receiptNumber, year, month (English name e.g. "January")
 - blockNo, plotNo, ownerName (denormalised strings), amount (number)
@@ -297,12 +328,12 @@ bookYear 2026/bookMonth 3 here and year 2015 in \`payments\`. Route by that:
     year -> payments, summing \`totalReceived\`** (the dues ledger is the complete
     record of money received; the cash book holds only what an admin typed in and
     is near-empty, so it answers zero).
-- plot (ObjectId -> plots), amount (number), method ("cash"|"bank"|"online"|"cheque"|"other")
-- receivedDate (date); bookYear (number), bookMonth (number 1-12) — the period
-  the cash landed in; bookOrdinal (number) = bookYear*12 + bookMonth, for ranges
-- arrearsAmount / currentAmount / advanceAmount (number) — the part of \`amount\`
-  paying for months before / during / after the book period
-- unallocatedAmount (number) — part not tied to any month (donation, fine)
+- plot (-> plots), amount (number), method ("cash"|"bank"|"online"|"cheque"|"other")
+- receivedDate (date); bookYear, bookMonth (1-12) — the period the cash landed
+  in; bookOrdinal = bookYear*12 + bookMonth, for ranges
+- arrearsAmount / currentAmount / advanceAmount — the part of \`amount\` paying for
+  months before / during / after the book period
+- unallocatedAmount — not tied to any month (donation, fine)
 - entryType ("live"|"historical"), countInCashBook (boolean)
 - isVoided (boolean), voidedAt, voidReason
 **Two filters are almost always required on this collection:**
@@ -321,26 +352,22 @@ about historical or archival entries.
 **Always add { "isVoided": false }** unless the admin asks about voided entries.
 
 ### expensecategories — the spending headings
-- name, nameUr (string), monthlyBudget (number|null, a soft warning only,
-  never enforced), isActive (boolean), sortOrder (number)
+- name, nameUr (string), monthlyBudget (number|null — a soft warning, never
+  enforced), isActive (boolean), sortOrder (number)
 
 ### financesettings — a SINGLE configuration document (key: "default")
-- openingBalance (number) — cash carried forward from before the system existed.
-  Every running-savings figure starts from it.
-- openingAsOf (date) — the period that balance is stated at. Month reports before
-  it are historical archive; from it onwards is live bookkeeping.
-- note (string)
+- openingBalance (number) — cash carried forward from before the system; every
+  running-savings figure starts from it
+- openingAsOf (date) — the period that balance is stated at; note (string)
 
 ### notices — dues notices generated for owners
-- type ("plot"|"block"|"phase"), targetId (string), targetLabel (string) — a
-  readable label like "374 A", "374 A +4 more", "A", or "Phase 1"
+- type ("plot"|"block"|"phase"), targetId, targetLabel (strings; a readable label
+  like "374 A", "374 A +4 more", "A", "Phase 1")
 - year, yearFrom, yearTo (number); monthFrom, monthTo ("jan".."dec")
 - language ("en"|"ur"), paymentDeadline (date|null)
-- minDuesThreshold (number) — the dues cut-off the batch was generated at
-- plotCount (number) — plots covered by this notice
-- totalDue (number) — total dues the notice was issued for
-There is **no plot reference** on notices; use targetId / targetLabel, which hold
-strings. So plotFilter does not work here.
+- minDuesThreshold (number) — the dues cut-off the batch used
+- plotCount, totalDue (number) — plots covered and dues issued for
+**No plot reference**, so plotFilter does not work here; use targetId/targetLabel.
 
 ### Lookup collections
 Note: \`years\`, \`blocks\` and \`phases\` are configuration tables that may hold no
@@ -368,14 +395,13 @@ rather than querying \`blocks\`/\`phases\`.
 2. **count** — how many documents match.
    { "op": "count", "collection": "<name>", "filter": {...}, "plotFilter": {...} }
 
-3. **sumDuesByPlot** — total dues per plot SUMMED ACROSS YEARS, joined to owner
-   details. Use this whenever dues are compared to a number above 4800, or when
-   the question says "total dues" / "overall outstanding" without naming a year.
+3. **sumDuesByPlot** — dues per plot SUMMED ACROSS YEARS, with owner details.
+   Use whenever dues are compared to a number above 4800, or the question says
+   "total dues" / "overall outstanding" without naming a year.
    { "op": "sumDuesByPlot", "yearFrom": 2012, "yearTo": 2026,
-     "minTotalRemaining": 10000,
-     "plotFilter": {...}, "sortDir": -1, "limit": 25 }
-   OMIT minTotalRemaining/maxTotalRemaining entirely when there is no such
-   bound. Never send 0 to mean "no limit" — 0 means literally zero rupees.
+     "minTotalRemaining": 10000, "plotFilter": {...}, "sortDir": -1, "limit": 25 }
+   Omit minTotalRemaining/maxTotalRemaining when there is no bound; never send 0
+   to mean "no limit" — 0 means literally zero rupees.
 
 4. **duesSummary** — dues, receipts, COLLECTION RATE and per-plot averages for a
    year range. The only op that can produce a ratio or an average, so every
@@ -466,6 +492,16 @@ Regular / odd size / prime / mortgage exist only on the site plan. Never invent 
 them via "answer"; without them, set "unsupported" and say it is a site-plan
 question.
 
+### Paid vs unpaid this month — the two halves of the same question
+- who has NOT paid a month -> \`payments\`, the month cell:
+    { "op": "find", "collection": "payments", "populatePlot": true,
+      "filter": { "year": <year>, "payments.<mon>": null } }
+  (count instead of find for "how many"; the server matches null and 0 both)
+- who HAS paid it -> the same with { "payments.<mon>": { "$ne": null } }
+- what was RECORDED in a period, regardless of which month it paid off ->
+  \`paymentevents\` on paidAt.
+Use payments for the state of a month, paymentevents for the activity.
+
 ### Reference questions about the data itself
 - "which years do we have payment data for" -> { "op": "groupCount",
     "collection": "payments", "groupBy": "year", "sortDir": 1, "limit": 25 }
@@ -489,10 +525,11 @@ recent year usually means nothing was recorded, not that everyone paid.
 - Allowed filter operators: $eq $ne $gt $gte $lt $lte $in $nin $and $or $nor
   $not $exists $regex $options $size $all $elemMatch. Nothing else.
 - For name searches use case-insensitive regex: {"ownerName": {"$regex": "khan", "$options": "i"}}
-- **No per-month payment timestamp exists.** For "last N months" questions use
-  unpaid months of the relevant year ($or over payments.<month>: null), or
-  receipts.paymentDate if the admin means receipts, and say which in
-  "reinterpreted".
+- **When something was PAID lives only in \`paymentevents\`** (and, for money via
+  Accounts, collections.receivedDate). \`payments\` itself has no per-month
+  timestamp, so "who paid in the last N days" is a paymentevents question. For
+  periods before the log existed there is no timestamp at all: fall back to
+  unpaid months of the relevant year and say so in "reinterpreted".
 - Default limit 25, maximum ${MAX_LIMIT}. Prefer isActive: true on plots unless
   asked otherwise.
 

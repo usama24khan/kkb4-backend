@@ -78,6 +78,11 @@ export interface AiQueryResult {
  */
 const isReasoningModel = (model: string) => /gpt-oss/i.test(model);
 
+/** The operations a plan may name. */
+const SUPPORTED_OPS = [
+  'find', 'count', 'sumDuesByPlot', 'duesSummary', 'groupCount', 'sumAmount',
+];
+
 /** Extra completion room for a reasoning model's hidden tokens. */
 const REASONING_HEADROOM = 700;
 
@@ -312,8 +317,8 @@ async function resolvePlotFilter(
 
   // Normalised here as well as in normalisePlan, because sumDuesByPlot resolves
   // its plotFilter without going through plan normalisation.
-  const validated = normaliseBlankTests(
-    validateFilter(plotFilter, FIELDS.plots, 'plotFilter'),
+  const validated = coerceDates(
+    normaliseBlankTests(validateFilter(plotFilter, FIELDS.plots, 'plotFilter')),
   );
   const ids = await Plot.find(validated)
     .select('_id')
@@ -328,6 +333,49 @@ async function resolvePlotFilter(
   }
 
   return { [refField]: { $in: ids.map((d: any) => d._id as Types.ObjectId) } };
+}
+
+/**
+ * A date field compared against a string matches nothing in an aggregation.
+ *
+ * Mongoose casts query values against the schema for find/countDocuments, so
+ * { "paidAt": { "$gte": "2026-09-01" } } works there — but `aggregate` goes
+ * straight to the driver with no casting, and a string never equals a Date. So
+ * every "how much came in this week" or "spending between two dates" question
+ * routed through sumAmount/groupCount silently returned nothing.
+ *
+ * Field names carry the type reliably here (paidAt, receivedDate, expenseDate,
+ * createdAt …), so the coercion keys off the name rather than a per-collection
+ * table that would drift from the models.
+ */
+const isDateField = (name: string) => {
+  const leaf = name.split('.').pop() ?? name;
+  return (
+    /(At|Date)$/.test(leaf) ||
+    ['openingAsOf', 'paymentDeadline', 'dateFrom', 'dateTo'].includes(leaf)
+  );
+};
+
+function coerceDates(node: any, inDateField = false): any {
+  if (Array.isArray(node)) return node.map((v) => coerceDates(v, inDateField));
+
+  if (typeof node === 'string' && inDateField) {
+    // Accept what a model actually emits: "2026-09-01" or a full ISO stamp.
+    if (/^\d{4}-\d{2}-\d{2}([T ].*)?$/.test(node)) {
+      const d = new Date(node);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+    return node;
+  }
+  if (!isPlainObject(node)) return node;
+
+  const out: Record<string, any> = {};
+  for (const [key, value] of Object.entries(node)) {
+    // Operators inherit the field they sit under; a named field decides afresh.
+    const nowInDate = key.startsWith('$') ? inDateField : isDateField(key);
+    out[key] = coerceDates(value, nowInDate);
+  }
+  return out;
 }
 
 /**
@@ -555,8 +603,11 @@ async function buildPlotLabelMap(
   refField: string,
 ): Promise<Map<string, string>> {
   const filter = join ? { _id: join[refField] } : {};
+  // `block` is always fetched because phase is derived from it; the grouped
+  // field is fetched alongside. Selecting a fixed pair here is what made an
+  // ownerName grouping come back as a single "Unknown" bucket.
   const plots = await Plot.find(filter)
-    .select('block allotmentStatus')
+    .select(['block', plotGroupBy].join(' '))
     .maxTimeMS(QUERY_TIMEOUT_MS)
     .lean();
   const map = new Map<string, string>();
@@ -653,7 +704,7 @@ async function executeFind(rawPlan: Record<string, any>): Promise<Executed> {
   const fields = FIELDS[collection];
   const Model: any = COLLECTIONS[collection];
 
-  const filter = validateFilter(plan.filter, fields, collection);
+  const filter = coerceDates(validateFilter(plan.filter, fields, collection));
   const sort = validateSort(plan.sort, fields);
   const projection = validateProjection(plan.projection, fields);
   const limit = clampLimit(plan.limit);
@@ -698,7 +749,7 @@ async function executeCount(rawPlan: Record<string, any>): Promise<Executed> {
   const fields = FIELDS[collection];
   const Model: any = COLLECTIONS[collection];
 
-  const filter = validateFilter(plan.filter, fields, collection);
+  const filter = coerceDates(validateFilter(plan.filter, fields, collection));
   const join = await resolvePlotFilter(collection, plan.plotFilter);
   const finalFilter = join ? { $and: [filter, join] } : filter;
 
@@ -950,7 +1001,7 @@ async function executeGroupCount(rawPlan: Record<string, any>): Promise<Executed
   }
 
   const fields = FIELDS[collection];
-  const filter = validateFilter(plan.filter, fields, collection);
+  const filter = coerceDates(validateFilter(plan.filter, fields, collection));
   const join = await resolvePlotFilter(collection, plan.plotFilter);
   const match = join ? { $and: [filter, join] } : filter;
   const limit = clampLimit(plan.limit);
@@ -1140,7 +1191,7 @@ async function executeSumAmount(rawPlan: Record<string, any>): Promise<Executed>
   }
 
   const fields = FIELDS[collection];
-  const filter = validateFilter(plan.filter, fields, collection);
+  const filter = coerceDates(validateFilter(plan.filter, fields, collection));
   const join = await resolvePlotFilter(collection, plan.plotFilter);
   const match = join ? { $and: [filter, join] } : filter;
   const limit = clampLimit(plan.limit);
@@ -1381,6 +1432,30 @@ async function summarise(question: string, result: Executed): Promise<string> {
 }
 
 /**
+ * Validate and execute a plan directly, with no LLM in the loop.
+ *
+ * This is the seam between planning and execution, and it is what makes the
+ * execution half testable: Groq's free tier allows 8,000 tokens a minute, so a
+ * suite that went through `answerQuestion` would spend its time rate-limited
+ * rather than testing anything. Same validation, same allowlists, same
+ * read-only guarantees — the model is simply not the one writing the plan.
+ *
+ * Not reachable from any route; nothing accepts a caller-supplied plan.
+ */
+export async function runPlan(plan: Record<string, any>): Promise<Executed> {
+  switch (plan.op) {
+    case 'find':          return executeFind(plan);
+    case 'count':         return executeCount(plan);
+    case 'sumDuesByPlot': return executeSumDuesByPlot(plan);
+    case 'duesSummary':   return executeDuesSummary(plan);
+    case 'groupCount':    return executeGroupCount(plan);
+    case 'sumAmount':     return executeSumAmount(plan);
+    default:
+      throw new AiQueryError(`Unsupported operation "${plan.op}".`);
+  }
+}
+
+/**
  * Answer a natural-language question about the database, read-only.
  */
 export async function answerQuestion(question: string): Promise<AiQueryResult> {
@@ -1508,19 +1583,12 @@ export async function answerQuestion(question: string): Promise<AiQueryResult> {
     }
 
     try {
-      switch (plan.op) {
-        case 'find':          executed = await executeFind(plan); break;
-        case 'count':         executed = await executeCount(plan); break;
-        case 'sumDuesByPlot': executed = await executeSumDuesByPlot(plan); break;
-        case 'groupCount':    executed = await executeGroupCount(plan); break;
-        case 'duesSummary':   executed = await executeDuesSummary(plan); break;
-        case 'sumAmount':     executed = await executeSumAmount(plan); break;
-        default:
-          throw new AiQueryError(
-            `Unsupported operation "${plan.op}". Use one of: find, count, ` +
-              `sumDuesByPlot, duesSummary, groupCount, sumAmount.`,
-          );
+      if (!SUPPORTED_OPS.includes(plan.op)) {
+        throw new AiQueryError(
+          `Unsupported operation "${plan.op}". Use one of: ${SUPPORTED_OPS.join(', ')}.`,
+        );
       }
+      executed = await runPlan(plan);
       // An execution-level substitution (the dues-ledger fallback) matters more
       // to the admin than the planner's own paraphrase, so it wins the slot.
       reinterpreted = executed?.note ?? parsed.reinterpreted;

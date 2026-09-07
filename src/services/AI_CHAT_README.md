@@ -167,6 +167,21 @@ The generated file must be rebuilt when the map changes:
 node scripts/gen-society-facts.mjs
 ```
 
+## Checking it — `npm run check:ai-chat`
+
+`scripts/checkAiQueryPlans.ts` runs every operation through `runPlan`, the seam
+directly below the planner, and compares each result with an aggregate computed
+in the script. No LLM, so it costs nothing and never rate-limits; what it covers
+is the half that decides whether an answer is *true* — allowlists, joins, the
+null-or-zero and blank normalisers, the derived phase, the averages.
+
+It seeds three payments and deletes them again, so it refuses to run against a
+production database.
+
+The planner half — does the model pick the right operation for a given
+sentence — still needs real questions against real data, because that is what
+the prompt is for. The table below is that sweep.
+
 ## What a 51-question sweep found
 
 The question bank was derived from what the app itself offers — the `stats`
@@ -254,6 +269,9 @@ These are properties of the actual database, not the models:
 | `count` | How many documents match. |
 | `sumDuesByPlot` | Dues summed **across years** per plot, joined to owner details. |
 | `duesSummary` | Dues, receipts, collection rate and per-plot averages for a year range, optionally per block/phase. The only operation that returns a ratio. |
+
+Collections the AI may read now include `paymentevents` (see above), whose
+`paidAt` is the only per-month timestamp in the schema.
 | `groupCount` | Counts grouped by one field of the collection (`groupBy`) or of the related plot (`plotGroupBy`). |
 | `sumAmount` | Totals a money field, optionally broken down by `groupBy` or `plotGroupBy`. |
 
@@ -266,6 +284,52 @@ unanswerable: `find` would return rows for the admin to add up by hand, and
 separate allowlist (`SUMMABLE`) from `FIELDS`, because totalling a year, an
 ordinal, or an `_id` is never a sensible answer and would produce confident
 nonsense.
+
+## The payment activity log — `paymentevents`
+
+`Payment` records *how much* cleared each month but never *when*, so "what came
+in this month", "which plots paid this week", "how many payments were added
+today" had no answer anywhere in the schema. The cash book carries
+`receivedDate`, but only for money entered through Accounts — months typed
+straight into the payments grid never reach it.
+
+`models/PaymentEvent.ts` is an append-only log: one row per month cell that
+changes, written by every route that can change one.
+
+| Route | Source | Logged as |
+|---|---|---|
+| payments grid, all-months editor | `grid` | `payment` / `adjustment` |
+| single-month bulk edit | `bulk` | `payment` / `adjustment` |
+| one payment record edited | `record` | `payment` / `adjustment` |
+| void / restore a month | `record` | `void` / `restore` |
+| Accounts (cash book) | `cashbook` | `payment`, or `void` on reversal |
+| **Excel import** | — | **not logged** |
+
+Four decisions worth knowing:
+
+- **A rise is a payment, a fall is an adjustment.** `amount` is the *delta*, not
+  the month's total, and `balanceAfter` carries the resulting value so a row
+  stands on its own.
+- **The cash-book path logs the entry's own `receivedDate`**, not "now" — money
+  handed over on the 3rd and entered on the 8th belongs to the 3rd. It logs the
+  dues months the money paid *off*, which may be years earlier: a test payment
+  of 800 landed as four 2012 months.
+- **Imports are deliberately not logged.** A spreadsheet backfill of a decade
+  would otherwise read as thousands of payments arriving the moment someone
+  pressed Import. `PaymentService.upsert` takes a `source` for exactly this.
+- **Logging never fails a payment.** `PaymentEventService.record` swallows its
+  errors: a dropped row costs an admin a line of history, a rejected save would
+  cost them the payment.
+
+**It is not backfilled and cannot be.** The existing payment rows have no
+month-level dates — the information was never captured — so the log starts empty
+and fills from deployment. The prompt tells the planner to say the activity was
+never recorded rather than implying nothing was paid.
+
+Paired with the month-cell queries, this is what makes the two halves of the
+admin's real question answerable: `payments` for the *state* of a month (who has
+and hasn't paid it), `paymentevents` for the *activity* (what was recorded, when,
+by which route).
 
 ## Grouping by block or phase — `plotGroupBy`
 
