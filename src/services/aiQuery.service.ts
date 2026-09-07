@@ -709,6 +709,10 @@ async function executeCount(rawPlan: Record<string, any>): Promise<Executed> {
     plan: { op: 'count', collection, filter: echoFilter(finalFilter, PLOT_REF[collection]) },
     truncated: false,
     rowCount: 1,
+    // A count always produces one row, so `matched` is what tells the caller
+    // nothing was found — and a count of zero needs the honest empty-result
+    // message, not "0 plots have not paid", which reads as everyone paid.
+    matched: count,
   };
 }
 
