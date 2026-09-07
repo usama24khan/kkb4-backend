@@ -167,6 +167,37 @@ The generated file must be rebuilt when the map changes:
 node scripts/gen-society-facts.mjs
 ```
 
+## What a 51-question sweep found
+
+The question bank was derived from what the app itself offers — the `stats`
+endpoints (overview, top plots, top defaulters, top blocks, monthly trend),
+every admin page (plots, payments, finance, receipts, complaints, notices,
+blocks, phases, map) and every whitelisted collection — then run against the
+production database with the answers checked against aggregates computed
+directly in Mongo. Most answers were already right (society-wide dues
+9,441,713; block F highest at 925,996; Phase 1 worst at 4,413,160; unpaid March
+2014 in block B = 23; top-10 defaulters at 47,200 each — all exact).
+
+These are the ones that were wrong, and what each cost:
+
+| Question | Was | Cause | Fix |
+|---|---|---|---|
+| "How many plots have not paid this month?" | **0** (truth: 273) | unpaid months stored as `0`, not `null` | `normaliseMonthConditions` |
+| "How many plots have no phone recorded?" | **0** (truth: 278) | blanks stored as `""`, so `$exists:false` matches nothing | `normaliseBlankTests` |
+| "How many plots are in each block?" | "182 plots total" (truth: 278) | summariser added up the 8 rows it was shown | 15-row preview + no-arithmetic rule |
+| "Which owners have dues over 10,000?" | "25 owners" (truth: 268) | row cap read as the total | `totalMatching` counted when capped |
+| "How many plots are there in total?" | 502 error | site-plan facts (440 plots) vs register (278) → prose, not a plan | facts framed + one parse retry |
+| "Which owner has paid the most?" | refused | no way to group by owner | `ownerName`/`plotBlock` in `PLOT_GROUPABLE` |
+| "What is the collection rate for 2025?" | nothing found | needs received ÷ due; queried the empty `years` table | `duesSummary` operation |
+| "What is the average dues per plot?" | 3,178 (truth: 33,963) | divided by 3,941 payment rows, not 278 plots | averages computed in `duesSummary` |
+| "How many plots per phase?" | refused as site-plan | phase rule forbids reading `plots.phase` | grouped by block, phase derived |
+| "How many prime plots are there?" | refused, *with the answer inside the refusal* | envelope had no way to answer from the map | `answer` field, gated on layout facts |
+| "Which years have payment data?" | "the year 2012" | `find` returned one arbitrary row | groupCount example in the prompt |
+
+Two production data problems the sweep surfaced, for the admins rather than the
+code: **all 22 cash-book entries are voided**, so nothing counts as collected
+there; and `ownerPhone`/`ownerCnic` are empty on all 278 plots.
+
 ## Token budget — the real ceiling on the free tier
 
 Groq's free tier caps at **8,000 tokens per minute**, and that, not request
@@ -174,17 +205,30 @@ count, is what an admin runs into. Measured cost per question:
 
 | Case | Approx. tokens |
 |---|---|
-| Normal question, no retry | ~3,300 |
-| Normal question, one retry | ~6,200 |
-| Layout question, no retry | ~3,800 |
+| Normal question, no retry | ~5,100 |
+| Normal question, one retry | ~9,300 |
+| Layout question, no retry | ~5,700 |
 
-So roughly **two questions per minute**, or one if a retry fires. The planner
-prompt is ~2,700 tokens because it documents 13 collections; a retry resends the
-whole message array, which is what makes retries expensive.
+So roughly **one to two questions per minute**, and a retry can exceed the
+per-minute budget on its own — which is exactly what a rapid QA sweep sees as
+429s. The planner prompt is ~3,850 tokens (it documents 13 collections and six
+operations); a retry resends the whole message array, which is what makes
+retries expensive. It was ~2,700 before `plotGroupBy`, `duesSummary` and the
+data-quirk rules; a compression pass took it back down from ~4,450 without
+dropping a rule, and any further growth should pay for itself the same way.
 
-Levers, cheapest first: leave the layout gate in place; set `GROQ_MODEL` to a
-smaller model; or move off the free tier, at which point the gate can be dropped
-and `SOCIETY_FACTS` attached unconditionally.
+The headers confirm it: `x-ratelimit-limit-tokens: 8000` per minute and
+`x-ratelimit-limit-requests: 1000` per day. Tokens bind first, so the 429 message
+now names the real limit and how long to wait rather than saying "a moment".
+
+`describeSingleRow` removes the second Groq call entirely for single-row results
+— counts, grand totals, a one-row `duesSummary` — which covers most "how many"
+and "how much" questions. That is ~900 tokens saved and one less place for the
+model to do arithmetic it was told not to do.
+
+Remaining levers, cheapest first: leave the layout gate in place; set
+`GROQ_MODEL` to a smaller model; or move off the free tier, at which point the
+gate can be dropped and `SOCIETY_FACTS` attached unconditionally.
 
 ## Live-data quirks the prompt must account for
 
@@ -209,6 +253,7 @@ These are properties of the actual database, not the models:
 | `find` | Read documents from one collection, with optional `plotFilter` join and `populatePlot`. |
 | `count` | How many documents match. |
 | `sumDuesByPlot` | Dues summed **across years** per plot, joined to owner details. |
+| `duesSummary` | Dues, receipts, collection rate and per-plot averages for a year range, optionally per block/phase. The only operation that returns a ratio. |
 | `groupCount` | Counts grouped by one field of the collection (`groupBy`) or of the related plot (`plotGroupBy`). |
 | `sumAmount` | Totals a money field, optionally broken down by `groupBy` or `plotGroupBy`. |
 
@@ -270,7 +315,14 @@ can actually answer is the worst failure this feature has.
 - **`payments` is one document per plot per year.** `remaining` therefore covers
   a single year and caps at `mcRate × 12` (4,800). Any "dues over N" question
   where N > 4,800 must use `sumDuesByPlot`, not a `find` on `remaining`.
-- **`null` means unpaid** in `payments.jan … payments.dec`. Zero is not used.
+- **Unpaid months are encoded two ways.** The model defaults every month to
+  `null`, but live rows also use `0`: for 2026, 273 of 278 payment rows carry `0`
+  for an unpaid month and *none* carry `null`; 2025 is a mix (146 null, 79 zero);
+  2014 is all `null`. So `{ "payments.sep": null }` — what the prompt used to
+  teach — reported that nobody was behind on September 2026 when 273 plots were.
+  `normaliseMonthConditions` now rewrites every month condition in one place
+  (`null` → `{ $in: [null, 0] }`, `$ne: null` → `{ $gt: 0 }`), including inside
+  `$and`/`$or`, so the model can keep writing the simple test.
 - **There is no per-month payment timestamp.** Questions like "no payment in 90
   days" cannot be answered literally. The model reinterprets them as unpaid
   months of the relevant year and returns a `note` explaining the substitution,

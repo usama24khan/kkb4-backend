@@ -94,7 +94,9 @@ export const FIELDS: Record<CollectionName, string[]> = {
   blocks: ['_id', 'code', 'phase', 'isActive', 'createdAt', 'updatedAt'],
   phases: ['_id', 'name', 'isActive', 'createdAt', 'updatedAt'],
   years: ['_id', 'year', 'mcRate', 'isActive', 'notes', 'createdAt', 'updatedAt'],
-  monthlyrates: ['_id', 'year', 'rate', 'updatedAt'],
+  // `fromMonth` matters: the rise to 400 took effect in May 2022, so that year
+  // has two rows and a rate is only unambiguous with the month it starts from.
+  monthlyrates: ['_id', 'year', 'rate', 'fromMonth', 'createdAt', 'updatedAt'],
   complaints: [
     '_id', 'trackingNumber', 'trackingNumericId', 'year', 'name', 'mobile',
     'message', 'status', 'resolvedAt', 'createdAt', 'updatedAt',
@@ -162,8 +164,15 @@ export const GROUPABLE: Partial<Record<CollectionName, string[]>> = {
  *
  * `phase` is derived from the plot's block through BLOCK_PHASE_MAP rather than
  * read off the plot, because stored phase values are unmigrated legacy strings.
+ *
+ * `ownerName` and `plotBlock` are here despite being high-cardinality: they are
+ * bounded by the plot register (a few hundred rows, all of which the fold already
+ * loads), and "which owner has paid the most" was otherwise unanswerable — the
+ * model correctly reported that it had no way to group by owner.
  */
-export const PLOT_GROUPABLE = ['block', 'phase', 'allotmentStatus'] as const;
+export const PLOT_GROUPABLE = [
+  'block', 'phase', 'allotmentStatus', 'ownerName', 'plotBlock',
+] as const;
 
 export type PlotGroupField = (typeof PLOT_GROUPABLE)[number];
 
@@ -253,23 +262,20 @@ export const SCHEMA_PROMPT = `You translate an admin's question about the KKB4 h
   that has not been migrated yet.
 - plotBlock (string) "374 A"; plotCode (string) "374-A"
 - allotmentStatus (string) "Active" | "Cancelled" | "Unsold" | "Unknown"
-- isActive (boolean) — false means soft-deleted. **In live data every
-  isActive:false plot is exactly the set of allotmentStatus:"Cancelled" plots.**
-  So add isActive:true for general questions about current plots, but do NOT add
-  it when the admin asks about cancelled / inactive / removed plots — that
-  combination always returns zero.
+- isActive (boolean) — false == allotmentStatus "Cancelled" (the same rows). Add
+  isActive:true for general questions; NEVER add it to a cancelled/inactive
+  question, which would then always return zero.
 - ownerPhone, ownerCnic (string); monthlyChargeOverride (number|null)
 - createdAt, updatedAt (date)
 
 ### payments — ONE DOCUMENT PER PLOT PER YEAR (maintenance dues)
 - plot (ObjectId -> plots), year (number, data exists ${YEARS_WITH_DATA[0]}–${YEARS_WITH_DATA[YEARS_WITH_DATA.length - 1]})
 - mcRate (number) monthly charge, 200 for years <= 2021, 400 from 2022
-- payments.jan … payments.dec (number OR null) — amount paid that month.
-  **null means NOT PAID.** Use { "payments.mar": null } to find unpaid March.
-  \`payments\` is an EMBEDDED OBJECT, **not an array**. Never use $elemMatch,
-  $size, or $all on it, and never nest month keys under it. Always use the
-  dotted path. To test several months, use $or over dotted paths:
-    { "$or": [ { "payments.jan": null }, { "payments.feb": null } ] }
+- payments.jan … payments.dec — amount paid that month. Unpaid is null in old
+  rows and 0 in new ones; just write { "payments.mar": null } (or "$ne": null for
+  paid) and the server covers both. Never write your own $or over null and 0.
+  \`payments\` is an EMBEDDED OBJECT, not an array — no $elemMatch/$size/$all, no
+  nesting; always the dotted path. Several months: $or over dotted paths.
 - totalReceived (number) sum paid that year
 - totalDue (number) = mcRate * 12 for that year
 - remaining (number) = totalDue - totalReceived, i.e. dues **for that one year only**
@@ -282,22 +288,15 @@ export const SCHEMA_PROMPT = `You translate an admin's question about the KKB4 h
 - paymentDate (date), isVerified (boolean)
 
 ### collections — THE CASH BOOK: one row per payment actually received
-Do not confuse this with \`payments\`. The distinction matters:
-- \`payments\` records **what the money is for** (which months of dues are cleared).
-- \`collections\` records **when the cash physically arrived**.
-A payment handed over in March 2026 clearing 2015 dues sits in bookYear 2026 /
-bookMonth 3 here, and in year 2015 in \`payments\`. So:
-  * "how much cash arrived in <period>" / cash book / by payment method /
-    "what did we bank in March" -> collections, on bookYear/bookMonth
-  * "which months are unpaid for this plot" -> payments
-  * **"which block/plot/owner PAID the most for <year>", "top paying blocks in
-    <year>", "how much has been received for <year>" -> payments, summing
-    \`totalReceived\`** — that is the dues ledger, which is the complete record of
-    money received against a year. The cash book is only as complete as the
-    entries an admin has typed into it and is currently near-empty, so routing a
-    "who paid most" question there returns zero and tells the admin nothing.
-    Reach for collections only when the question is genuinely about WHEN cash
-    arrived or HOW it was paid.
+\`payments\` = what the money is FOR (which months are cleared); \`collections\` =
+when the cash ARRIVED. Cash handed over in March 2026 clearing 2015 dues is
+bookYear 2026/bookMonth 3 here and year 2015 in \`payments\`. Route by that:
+  * cash arriving in a period / by payment method / "what did we bank" -> collections
+  * unpaid months for a plot -> payments
+  * **who PAID most for <year>, top paying blocks, how much was received for a
+    year -> payments, summing \`totalReceived\`** (the dues ledger is the complete
+    record of money received; the cash book holds only what an admin typed in and
+    is near-empty, so it answers zero).
 - plot (ObjectId -> plots), amount (number), method ("cash"|"bank"|"online"|"cheque"|"other")
 - receivedDate (date); bookYear (number), bookMonth (number 1-12) — the period
   the cash landed in; bookOrdinal (number) = bookYear*12 + bookMonth, for ranges
@@ -344,10 +343,19 @@ There is **no plot reference** on notices; use targetId / targetLabel, which hol
 strings. So plotFilter does not work here.
 
 ### Lookup collections
+Note: \`years\`, \`blocks\` and \`phases\` are configuration tables that may hold no
+rows at all in live data — an empty answer from them means "not configured",
+not "no such block". The block and phase lists in this prompt are authoritative,
+so answer "how many blocks are there" or "which phase is block L in" from them
+directly (with a count on \`plots\` if the question is about plots per block)
+rather than querying \`blocks\`/\`phases\`.
 - blocks: code, phase, isActive
 - phases: name, isActive
-- years: year, mcRate, isActive, notes
-- monthlyrates: year, rate
+- years: year, mcRate, isActive, notes — **may be empty; do not rely on it**
+- monthlyrates: year, rate, fromMonth — the authoritative rate table, one row per
+  rate change. 2022 has two rows (fromMonth 1 = 200, fromMonth 5 = 400), so quote
+  a rate together with the month it takes effect. \`payments.mcRate\` on a given
+  year's rows is the other reliable source.
 - complaints: trackingNumber ("CMP-2026-0001"), name, mobile, message,
   status ("pending"|"in_progress"|"resolved"), resolvedAt, createdAt
 
@@ -369,7 +377,17 @@ strings. So plotFilter does not work here.
    OMIT minTotalRemaining/maxTotalRemaining entirely when there is no such
    bound. Never send 0 to mean "no limit" — 0 means literally zero rupees.
 
-4. **groupCount** — counts grouped by one field.
+4. **duesSummary** — dues, receipts, COLLECTION RATE and per-plot averages for a
+   year range. The only op that can produce a ratio or an average, so every
+   "what percentage / collection rate / how are we doing / average per plot"
+   question is this one.
+   { "op": "duesSummary", "yearFrom": 2025, "yearTo": 2025,
+     "plotGroupBy": "block", "sortDir": -1, "limit": 25, "plotFilter": {...} }
+   Returns plots, totalDue, totalReceived, totalRemaining, collectionRate %,
+   avgRemainingPerPlot, avgReceivedPerPlot. Omit plotGroupBy for one
+   society-wide row; omit the years for all time.
+
+5. **groupCount** — counts grouped by one field.
    { "op": "groupCount", "collection": "plots", "groupBy": "block", "filter": {...},
      "sortDir": -1, "limit": 25 }
    Group by EITHER "groupBy" (a field on the collection itself) OR "plotGroupBy"
@@ -380,7 +398,7 @@ strings. So plotFilter does not work here.
        "collection": "collections", "plotGroupBy": "phase",
        "filter": { "bookYear": 2026, "isVoided": false, "countInCashBook": true } }
 
-5. **sumAmount** — TOTAL a money field, optionally broken down by one field.
+6. **sumAmount** — TOTAL a money field, optionally broken down by one field.
    Use this for every "how much" question about income or spending; never fetch
    rows and expect the admin to add them up.
    { "op": "sumAmount", "collection": "expenses", "field": "amount",
@@ -411,31 +429,25 @@ strings. So plotFilter does not work here.
        "sortDir": -1, "limit": 5, "filter": { "year": 2026 } }
      (\`payments.totalReceived\`, NOT the cash book — see the collections section.)
 
-### sortDir — "highest" vs "lowest"
-Both groupCount and sumAmount accept "sortDir": -1 (largest first, the default)
-or 1 (smallest first). ALWAYS send "sortDir": 1 when the question asks for the
-lowest / least / smallest / fewest / worst-performing, and leave it at -1 for
-highest / most / top / best. Never answer a "lowest" question with a
-largest-first list.
+### sortDir
+groupCount, sumAmount, duesSummary and sumDuesByPlot take "sortDir": -1 (largest
+first, default) or 1. Send 1 for lowest/least/smallest/fewest/worst, -1 for
+highest/most/top/best. Never answer a "lowest" question largest-first.
 
-### Plot grouping rule — how to break any question down by block or phase
-\`collections\`, \`payments\` and \`receipts\` do not store a block, phase or owner of
-their own; those live on the related plot. Set "plotGroupBy" to fold the rows up
-through their plot. It is accepted by **both groupCount and sumAmount**, on
-collections, payments and receipts, and takes exactly one of:
-block, phase, allotmentStatus.
-Counting per block and totalling per block are equally supported — grouping a
-count by a plot attribute is NOT a limitation of this API.
-- "plotGroupBy": "phase" is resolved through each plot's BLOCK, so it is safe
-  despite the unmigrated phase field — you do NOT need to expand phases into
-  blocks yourself when grouping.
-- Blocks or phases with no matching rows come back with a total of 0 (unless a
-  plotFilter narrowed the question), so a "lowest" answer is not skewed by a
-  block that collected nothing.
-- Use "groupBy" for a field on the collection itself and "plotGroupBy" for a
-  plot attribute — never both in one plan.
-So "which block collected the least / which phase pays best / dues by block" are
-all ANSWERABLE. Never call such a question unsupported for lack of joins.
+### Plot grouping rule — any question broken down by block, phase or owner
+collections/payments/receipts store no block, phase or owner of their own; those
+live on the related plot. "plotGroupBy" folds rows up through their plot and is
+accepted by groupCount, sumAmount and duesSummary, taking exactly one of:
+block, phase, allotmentStatus, ownerName, plotBlock ("374 A").
+- So "which owner paid most" is plotGroupBy: "ownerName". Counting per block and
+  totalling per block are equally supported. NEVER call a per-block, per-phase or
+  per-owner question unsupported for lack of joins.
+- "phase" resolves through each plot's block, so it is safe despite the phase
+  rule — do not expand phases into blocks yourself when grouping.
+- Empty blocks/phases come back as 0 (unless a plotFilter narrowed the question),
+  so a "lowest" answer is not skewed by one that collected nothing.
+- Use "groupBy" for a field on the collection, "plotGroupBy" for a plot
+  attribute — never both.
 
 ## Rules
 
@@ -449,16 +461,24 @@ When you do this, set "reinterpreted" to note that the phase was resolved via
 its blocks. You MAY still return \`phase\` in a projection for display.
 
 ### Plot type is NOT in the database
-The site plan classifies plots as regular / odd size / prime / mortgage, but no
-collection stores that. Never invent a \`category\`, \`plotType\` or \`type\` field on
-plots. If a question turns on plot type and you were not given the layout facts,
-set "unsupported" and say the question is about the site plan.
+Regular / odd size / prime / mortgage exist only on the site plan. Never invent a
+\`category\`, \`plotType\` or \`type\` field. With layout facts supplied, answer from
+them via "answer"; without them, set "unsupported" and say it is a site-plan
+question.
+
+### Reference questions about the data itself
+- "which years do we have payment data for" -> { "op": "groupCount",
+    "collection": "payments", "groupBy": "year", "sortDir": 1, "limit": 25 }
+  A \`find\` returns one arbitrary row and invites the answer "we have 2012".
+- "how many plots per phase" / "plots in each phase" -> { "op": "groupCount",
+    "collection": "plots", "groupBy": "phase", "filter": { "isActive": true } }
+  This ONE case is safe despite the phase rule: the server groups by block and
+  derives the phase, so the legacy phase strings are never read. This is a
+  database question, not a site-plan question.
 
 ### Data coverage
-Payment data does not exist for every year in every block — some blocks only
-have early years (e.g. 2012–2014). Zero results for a recent year usually means
-no data was recorded, not that everyone paid. If a question names "this month"
-or "this year" and returns nothing, that is a legitimate empty result.
+Payment data is uneven — some blocks hold only early years. Zero results for a
+recent year usually means nothing was recorded, not that everyone paid.
 
 - \`plotFilter\` applies ONLY on payments, receipts and collections. It filters the related
   plot (block, phase, ownerName, allotmentStatus, plotNumber, isActive) and is
@@ -469,26 +489,28 @@ or "this year" and returns nothing, that is a legitimate empty result.
 - Allowed filter operators: $eq $ne $gt $gte $lt $lte $in $nin $and $or $nor
   $not $exists $regex $options $size $all $elemMatch. Nothing else.
 - For name searches use case-insensitive regex: {"ownerName": {"$regex": "khan", "$options": "i"}}
-- **There is NO per-month payment timestamp in this schema.** For questions
-  about "last N days/months" of payment activity, either use unpaid months of
-  the relevant year (payments.<month>: null), or receipts.paymentDate if the
-  admin explicitly means receipts. Set "reinterpreted" to a short note saying
-  which you chose, so the admin is told what was actually measured.
+- **No per-month payment timestamp exists.** For "last N months" questions use
+  unpaid months of the relevant year ($or over payments.<month>: null), or
+  receipts.paymentDate if the admin means receipts, and say which in
+  "reinterpreted".
 - Default limit 25, maximum ${MAX_LIMIT}. Prefer isActive: true on plots unless
   asked otherwise.
 
 ### Before answering "unsupported"
-Set "unsupported" only when NO field in the schema above carries the information
-(e.g. plot type, which is on the site plan only). It is NOT a reason to give up
-that a question spans two collections: \`plotFilter\` filters by plot attributes
-and \`plotGroupBy\` groups by them, so any question about blocks, phases, owners
-or plot status combined with money, dues or receipts can be answered. Prefer the
-closest answerable query plus a "reinterpreted" note over refusing.
+Only when NO field above carries the information. Spanning two collections is
+never a reason: plotFilter filters by plot attributes and plotGroupBy groups by
+them, so anything about blocks, phases, owners or plot status combined with
+money, dues or receipts is answerable. Prefer the closest query plus a
+"reinterpreted" note over refusing.
 
 Return ONLY JSON, with this envelope:
 { "plan": { ...one operation above... },
   "reinterpreted": "optional short note if you changed the meaning of the question",
-  "unsupported": "set ONLY if the schema genuinely cannot answer this; then omit plan" }`;
+  "answer": "site-plan questions ONLY, when layout facts were supplied above and
+             contain the answer: one short sentence from those facts, no plan.
+             Never use it to state anything about the database.",
+  "unsupported": "set ONLY if neither a query nor the site-plan facts can answer
+                  this; then omit plan" }`;
 
 /**
  * Today's date, as a second system message. Built per request rather than baked
@@ -543,7 +565,9 @@ export function needsLayoutFacts(question: string): boolean {
 /** Compact reference echoed to the client so the UI can show what's queryable. */
 export const CAPABILITIES = {
   collections: Object.keys(COLLECTIONS),
-  operations: ['find', 'count', 'sumDuesByPlot', 'groupCount', 'sumAmount'],
+  operations: [
+    'find', 'count', 'sumDuesByPlot', 'duesSummary', 'groupCount', 'sumAmount',
+  ],
   plotGroupBy: [...PLOT_GROUPABLE],
   maxLimit: MAX_LIMIT,
   readOnly: true,

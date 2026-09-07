@@ -54,6 +54,8 @@ export interface AiQueryResult {
   rowCount: number;
   /** Whether rowCount was capped by the limit. */
   truncated: boolean;
+  /** Total matching records when `truncated` — the table shows the first page. */
+  totalMatching?: number;
   /** The validated plan actually executed — surfaced for admin transparency. */
   plan: Record<string, any>;
   /** Set when the model reinterpreted an unanswerable-as-asked question. */
@@ -78,6 +80,13 @@ const isReasoningModel = (model: string) => /gpt-oss/i.test(model);
 
 /** Extra completion room for a reasoning model's hidden tokens. */
 const REASONING_HEADROOM = 700;
+
+/**
+ * Rows shown to the summariser. Enough that a 13-block or 12-month breakdown
+ * arrives whole — those are the shapes an admin asks for — while staying inside
+ * the free tier's per-minute token budget.
+ */
+const PREVIEW_ROWS = 15;
 
 async function callGroq(
   messages: { role: string; content: string }[],
@@ -115,7 +124,17 @@ async function callGroq(
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       if (res.status === 429) {
-        throw new AiQueryError('Groq rate limit reached — wait a moment and try again.', 429);
+        // The free tier's ceiling is 8,000 tokens a MINUTE (1,000 requests a
+        // day), and one question costs ~5,100 — so this fires on the second
+        // quick question, and "a moment" understated the wait.
+        const retryAfter = Number(res.headers.get('retry-after'));
+        const wait = Number.isFinite(retryAfter) && retryAfter > 0
+          ? `about ${Math.ceil(retryAfter)} seconds`
+          : 'about a minute';
+        throw new AiQueryError(
+          `Groq's free-tier limit (8,000 tokens per minute) is used up — wait ${wait} and ask again.`,
+          429,
+        );
       }
       if (res.status === 401) {
         throw new AiQueryError('Groq rejected the API key — check GROQ_API_KEY.', 502);
@@ -291,7 +310,11 @@ async function resolvePlotFilter(
     throw new AiQueryError(`plotFilter is not supported on ${collection}.`);
   }
 
-  const validated = validateFilter(plotFilter, FIELDS.plots, 'plotFilter');
+  // Normalised here as well as in normalisePlan, because sumDuesByPlot resolves
+  // its plotFilter without going through plan normalisation.
+  const validated = normaliseBlankTests(
+    validateFilter(plotFilter, FIELDS.plots, 'plotFilter'),
+  );
   const ids = await Plot.find(validated)
     .select('_id')
     .limit(MAX_JOIN_IDS + 1)
@@ -305,6 +328,95 @@ async function resolvePlotFilter(
   }
 
   return { [refField]: { $in: ids.map((d: any) => d._id as Types.ObjectId) } };
+}
+
+/**
+ * Make "unpaid month" mean what it means in the data.
+ *
+ * The Payment model defaults every month to `null`, so the prompt has always
+ * told the model that `{ "payments.sep": null }` finds unpaid September. That is
+ * true only of the older rows. Live data holds both encodings — for 2026, 273 of
+ * 278 rows carry `0` for an unpaid month and NONE carry null; 2025 is a mix of
+ * both; 2014 is all null. A literal null test therefore reported that nobody was
+ * behind on September 2026 when 273 plots were, which is the single worst kind of
+ * wrong answer this feature can give.
+ *
+ * Rather than ask the model to remember an `$or` on every month question, the
+ * conditions are rewritten here, in one place, wherever they appear (including
+ * inside $and/$or):
+ *   null / { $eq: null }  ->  { $in: [null, 0] }   "not paid"
+ *   { $ne: null }         ->  { $gt: 0 }           "paid something"
+ *   { $in: [..., null] }  ->  0 added to the list
+ * Anything else — a numeric comparison, $exists — is left alone.
+ */
+function normaliseMonthConditions(node: any): any {
+  if (Array.isArray(node)) return node.map(normaliseMonthConditions);
+  if (!isPlainObject(node)) return node;
+
+  const out: Record<string, any> = {};
+  for (const [key, value] of Object.entries(node)) {
+    const isMonthPath =
+      key.startsWith('payments.') &&
+      (MONTHS as readonly string[]).includes(key.slice('payments.'.length));
+
+    if (!isMonthPath) {
+      out[key] = normaliseMonthConditions(value);
+      continue;
+    }
+
+    if (value === null) {
+      out[key] = { $in: [null, 0] };
+    } else if (isPlainObject(value)) {
+      const cond = { ...value };
+      if ('$eq' in cond && cond.$eq === null) {
+        delete cond.$eq;
+        cond.$in = [null, 0];
+      }
+      if ('$ne' in cond && cond.$ne === null) {
+        delete cond.$ne;
+        cond.$gt = 0;
+      }
+      if (Array.isArray(cond.$in) && cond.$in.includes(null) && !cond.$in.includes(0)) {
+        cond.$in = [...cond.$in, 0];
+      }
+      out[key] = cond;
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+/**
+ * Make "not recorded" mean what it means in the data.
+ *
+ * Mongo's `$exists: false` asks whether a key is absent — but this app writes
+ * blanks as empty strings, so every one of the 278 plots HAS an `ownerPhone`
+ * key whose value is `""`. Asked how many plots have no phone recorded, the
+ * literal test answered 0 when the honest answer is all of them.
+ *
+ * `{ $exists: false }` therefore becomes `{ $in: [null, ''] }` — which still
+ * matches absent keys, since a null equality test in Mongo covers missing — and
+ * `{ $exists: true }` becomes `{ $nin: [null, ''] }`, so "has a phone number"
+ * doesn't return every plot. Numeric fields are unaffected: no number equals ''.
+ *
+ * Skipped under $not/$nor, where widening a condition would invert its meaning.
+ */
+function normaliseBlankTests(node: any, negated = false): any {
+  if (Array.isArray(node)) return node.map((n) => normaliseBlankTests(n, negated));
+  if (!isPlainObject(node)) return node;
+
+  const out: Record<string, any> = {};
+  for (const [key, value] of Object.entries(node)) {
+    const nowNegated = negated || key === '$not' || key === '$nor';
+
+    if (!negated && isPlainObject(value) && '$exists' in value && Object.keys(value).length === 1) {
+      out[key] = value.$exists === false ? { $in: [null, ''] } : { $nin: [null, ''] };
+      continue;
+    }
+    out[key] = normaliseBlankTests(value, nowNegated);
+  }
+  return out;
 }
 
 /**
@@ -333,14 +445,18 @@ function normalisePlan(collection: CollectionName, plan: Record<string, any>): R
       out.filter = Object.keys(filter).length
         ? { $and: [filter, out.plotFilter] }
         : out.plotFilter;
+    } else {
+      out.filter = filter;
     }
     delete out.plotFilter;
+    out.filter = normaliseBlankTests(out.filter);
     return out;
   }
 
   const refField = PLOT_REF[collection];
   if (!refField) {
     delete out.plotFilter;
+    out.filter = normaliseBlankTests(filter);
     return out;
   }
 
@@ -368,10 +484,9 @@ function normalisePlan(collection: CollectionName, plan: Record<string, any>): R
     }
   }
 
-  // Models also nest the month map — { payments: { mar: null } } — where Mongo
-  // needs the dotted path { "payments.mar": null }. Expand month keys; anything
-  // left under `payments` still fails validation, since bare `payments` is not
-  // a queryable path.
+  // 4. Unpaid months. See normaliseMonthConditions — live data encodes "not
+  //    paid" as BOTH null and 0, so a literal null test silently misses most of
+  //    it. Applied after the nested-month expansion below.
   if (collection === 'payments' && isPlainObject(filter.payments)) {
     const nested = { ...filter.payments };
     for (const monthKey of Object.keys(nested)) {
@@ -391,6 +506,13 @@ function normalisePlan(collection: CollectionName, plan: Record<string, any>): R
     // Owner details are the point of such a query — make sure they show up.
     if (out.populatePlot === undefined) out.populatePlot = true;
   }
+
+  // Last, so the rewrites survive the lifting above rather than being replaced
+  // by the raw filter it hands back.
+  out.filter = isPlainObject(out.filter) ? out.filter : filter;
+  if (collection === 'payments') out.filter = normaliseMonthConditions(out.filter);
+  out.filter = normaliseBlankTests(out.filter);
+  if (isPlainObject(out.plotFilter)) out.plotFilter = normaliseBlankTests(out.plotFilter);
 
   return out;
 }
@@ -516,6 +638,13 @@ interface Executed {
   matched?: number;
   /** Set when execution itself substituted a different source — see the note. */
   note?: string;
+  /**
+   * How many records match in total, when the row list was capped. Asked which
+   * owners owe over 10,000, the summariser called the 25 rows it was handed
+   * "25 owners" — the real figure is 268. Cheap to fetch and only fetched when
+   * the cap actually bit.
+   */
+  totalMatching?: number;
 }
 
 async function executeFind(rawPlan: Record<string, any>): Promise<Executed> {
@@ -547,9 +676,13 @@ async function executeFind(rawPlan: Record<string, any>): Promise<Executed> {
 
   const docs: any[] = await q;
   const truncated = docs.length > limit;
+  const totalMatching = truncated
+    ? await Model.countDocuments(finalFilter).maxTimeMS(QUERY_TIMEOUT_MS)
+    : undefined;
 
   return {
     rows: docs.slice(0, limit).map(flattenRow),
+    ...(totalMatching === undefined ? {} : { totalMatching }),
     plan: {
       op: 'find', collection, filter: echoFilter(finalFilter, refField), sort, projection, limit,
       populatePlot: !!plan.populatePlot,
@@ -635,6 +768,19 @@ async function executeSumDuesByPlot(plan: Record<string, any>): Promise<Executed
   const truncated = grouped.length > limit;
   const page = grouped.slice(0, limit);
 
+  // "Which owners owe over 10,000" is a question about how many, so the count
+  // matters even when only the first page of plots is shown.
+  let totalMatching: number | undefined;
+  if (truncated) {
+    const counted: any[] = await Payment.aggregate([
+      ...(Object.keys(match).length ? [{ $match: match }] : []),
+      { $group: { _id: '$plot', totalRemaining: { $sum: '$remaining' } } },
+      ...(Object.keys(having).length ? [{ $match: { totalRemaining: having } }] : []),
+      { $count: 'n' },
+    ]).option({ maxTimeMS: QUERY_TIMEOUT_MS });
+    totalMatching = counted[0]?.n;
+  }
+
   // Attach owner details in one extra read rather than a $lookup stage.
   const plots = await Plot.find({ _id: { $in: page.map((g) => g._id) } })
     .select('ownerName plotBlock block phase allotmentStatus')
@@ -659,6 +805,7 @@ async function executeSumDuesByPlot(plan: Record<string, any>): Promise<Executed
 
   return {
     rows,
+    ...(totalMatching === undefined ? {} : { totalMatching }),
     plan: {
       op: 'sumDuesByPlot', yearFrom, yearTo,
       minTotalRemaining: min, maxTotalRemaining: max, sortDir, limit,
@@ -666,6 +813,103 @@ async function executeSumDuesByPlot(plan: Record<string, any>): Promise<Executed
     },
     truncated,
     rowCount: rows.length,
+  };
+}
+
+/**
+ * Dues, receipts and the collection rate for a year range — the shape of the
+ * admin dashboard's headline numbers, in one row.
+ *
+ * Every other operation totals ONE field, so "what is the collection rate for
+ * 2025" had no answer: it is received / due, two sums and a ratio. The model
+ * reached for the `years` config table instead — empty in live data — and
+ * reported nothing. This computes the figures the stats service shows,
+ * optionally broken down by a plot attribute so "which block collects best"
+ * works too.
+ */
+async function executeDuesSummary(plan: Record<string, any>): Promise<Executed> {
+  const yearFrom = Number.isFinite(Number(plan.yearFrom)) ? Number(plan.yearFrom) : null;
+  const yearTo = Number.isFinite(Number(plan.yearTo)) ? Number(plan.yearTo) : null;
+  const plotGroupBy = validatePlotGroupBy('payments', plan.plotGroupBy);
+  const sortDir = sortDirection(plan.sortDir);
+  const limit = clampLimit(plan.limit);
+
+  const match: Record<string, any> = {};
+  if (yearFrom !== null || yearTo !== null) {
+    match.year = {};
+    if (yearFrom !== null) match.year.$gte = yearFrom;
+    if (yearTo !== null) match.year.$lte = yearTo;
+  }
+  const join = await resolvePlotFilter('payments', plan.plotFilter);
+  if (join) Object.assign(match, join);
+
+  // Grouped by plot first, so a plot count falls out of the fold and the
+  // per-label breakdown reuses the same buckets as every other plot grouping.
+  const Payment: any = COLLECTIONS.payments;
+  const buckets: any[] = await Payment.aggregate([
+    ...(Object.keys(match).length ? [{ $match: match }] : []),
+    {
+      $group: {
+        _id: '$plot',
+        due: { $sum: '$totalDue' },
+        received: { $sum: '$totalReceived' },
+        remaining: { $sum: '$remaining' },
+        years: { $sum: 1 },
+      },
+    },
+  ]).option({ maxTimeMS: QUERY_TIMEOUT_MS });
+
+  const labels = plotGroupBy
+    ? await buildPlotLabelMap(plotGroupBy, join, 'plot')
+    : new Map<string, string>();
+
+  type Bucket = { due: number; received: number; remaining: number; plots: number; years: number };
+  const acc = new Map<string, Bucket>();
+  if (plotGroupBy && !join) {
+    for (const label of plotGroupDomain(plotGroupBy) ?? []) {
+      acc.set(label, { due: 0, received: 0, remaining: 0, plots: 0, years: 0 });
+    }
+  }
+  for (const b of buckets) {
+    const label = plotGroupBy ? labels.get(String(b._id)) ?? 'Unknown' : 'All plots';
+    const cur = acc.get(label) ?? { due: 0, received: 0, remaining: 0, plots: 0, years: 0 };
+    cur.due += b.due || 0;
+    cur.received += b.received || 0;
+    cur.remaining += b.remaining || 0;
+    cur.years += b.years || 0;
+    cur.plots += 1;
+    acc.set(label, cur);
+  }
+
+  const rateOf = (received: number, due: number) =>
+    (due > 0 ? Math.round((received / due) * 1000) / 10 : 0);
+  const rows = [...acc.entries()]
+    .map(([label, v]) => ({
+      ...(plotGroupBy ? { [plotGroupBy]: label } : {}),
+      plots: v.plots,
+      totalDue: v.due,
+      totalReceived: v.received,
+      totalRemaining: v.remaining,
+      'collectionRate %': rateOf(v.received, v.due),
+      // Computed here because the summariser must not do arithmetic: asked for
+      // the average dues per plot it divided by the record count (3,941 payment
+      // rows) instead of the plot count (278) and was out by an order of
+      // magnitude.
+      avgRemainingPerPlot: v.plots ? Math.round(v.remaining / v.plots) : 0,
+      avgReceivedPerPlot: v.plots ? Math.round(v.received / v.plots) : 0,
+    }))
+    .sort((a, b) => (a['collectionRate %'] - b['collectionRate %']) * sortDir)
+    .slice(0, plotGroupBy ? limit : 1);
+
+  return {
+    rows,
+    plan: {
+      op: 'duesSummary', yearFrom, yearTo, plotGroupBy: plotGroupBy || null,
+      sortDir, limit, plotFilter: plan.plotFilter ?? null,
+    },
+    truncated: false,
+    rowCount: rows.length,
+    matched: buckets.length,
   };
 }
 
@@ -710,6 +954,41 @@ async function executeGroupCount(rawPlan: Record<string, any>): Promise<Executed
 
   const Model: any = COLLECTIONS[collection];
   const refField = PLOT_REF[collection];
+
+  // "How many plots per phase" asks the plots collection to group by a field the
+  // prompt forbids trusting: stored phase values are unmigrated legacy strings.
+  // Block IS authoritative, and phase is a function of block, so group by block
+  // and fold — the same trick plotGroupBy uses, applied to plots themselves.
+  // Previously the model concluded this was a site-plan question and refused.
+  if (collection === 'plots' && groupBy === 'phase') {
+    const byBlock: any[] = await Model.aggregate([
+      ...(Object.keys(match).length ? [{ $match: match }] : []),
+      { $group: { _id: '$block', count: { $sum: 1 } } },
+    ]).option({ maxTimeMS: QUERY_TIMEOUT_MS });
+
+    const acc = new Map<string, number>();
+    for (const label of plotGroupDomain('phase') ?? []) acc.set(label, 0);
+    for (const b of byBlock) {
+      const label = plotGroupValue({ block: b._id }, 'phase');
+      acc.set(label, (acc.get(label) ?? 0) + b.count);
+    }
+    const rows = [...acc.entries()]
+      .map(([phase, count]) => ({ phase, count }))
+      .sort((a, b) => (a.count - b.count) * sortDir)
+      .slice(0, limit);
+
+    return {
+      rows,
+      plan: {
+        op: 'groupCount', collection, groupBy: 'phase', derivedFrom: 'block',
+        filter: match, sortDir, limit,
+      },
+      truncated: false,
+      rowCount: rows.length,
+      matched: byBlock.reduce((n, b) => n + b.count, 0),
+    };
+  }
+
   const groupKey = plotGroupBy ? `$${refField}` : `$${groupBy}`;
 
   const buckets: any[] = await Model.aggregate([
@@ -976,7 +1255,9 @@ function flattenRow(doc: any): Record<string, any> {
 
 // ── Orchestration ───────────────────────────────────────────────────────────
 
-function parsePlanResponse(raw: string): { plan?: any; reinterpreted?: string; unsupported?: string } {
+function parsePlanResponse(
+  raw: string,
+): { plan?: any; reinterpreted?: string; unsupported?: string; answer?: string } {
   let parsed: any;
   try {
     parsed = JSON.parse(raw);
@@ -998,8 +1279,60 @@ function parsePlanResponse(raw: string): { plan?: any; reinterpreted?: string; u
   return parsed;
 }
 
+/**
+ * Sentence for a single-row result, written here instead of by the model.
+ *
+ * Two reasons. It removes the arithmetic hallucination surface on the commonest
+ * questions ("how many", "how much"), where there is nothing to summarise — the
+ * row IS the answer. And it saves the whole second Groq call: the free tier
+ * allows 8,000 tokens a minute and a question already costs ~5,100 for planning,
+ * so dropping ~900 is the difference between two questions a minute and one.
+ *
+ * Returns null for anything with a shape worth a sentence of its own.
+ */
+function describeSingleRow(result: Executed): string | null {
+  if (result.rowCount !== 1) return null;
+  const row = result.rows[0];
+  const op = result.plan.op;
+  const money = (n: number) => `PKR ${Math.round(n).toLocaleString('en-PK')}`;
+  const plural = (n: number, word: string) => `${n.toLocaleString('en-PK')} ${word}${n === 1 ? '' : 's'}`;
+
+  if (op === 'count' && typeof row.count === 'number') {
+    return `${plural(row.count, 'matching record')} in ${result.plan.collection}.`;
+  }
+
+  if (op === 'duesSummary' && typeof row['collectionRate %'] === 'number') {
+    const period =
+      result.plan.yearFrom && result.plan.yearTo
+        ? result.plan.yearFrom === result.plan.yearTo
+          ? ` for ${result.plan.yearFrom}`
+          : ` for ${result.plan.yearFrom}–${result.plan.yearTo}`
+        : '';
+    return (
+      `${money(row.totalReceived)} received of ${money(row.totalDue)} due${period} — ` +
+      `${row['collectionRate %']}% collected, ${money(row.totalRemaining)} outstanding ` +
+      `across ${plural(row.plots, 'plot')} (${money(row.avgRemainingPerPlot)} outstanding per plot).`
+    );
+  }
+
+  if (op === 'sumAmount' && !result.plan.groupBy && !result.plan.plotGroupBy) {
+    const key = Object.keys(row).find((k) => k.startsWith('total '));
+    if (key && typeof row[key] === 'number') {
+      return `${money(row[key])} in total across ${plural(row.records ?? 0, 'record')}.`;
+    }
+  }
+
+  return null;
+}
+
 async function summarise(question: string, result: Executed): Promise<string> {
-  const preview = JSON.stringify(result.rows.slice(0, 8));
+  // How many rows fit in the preview, and whether that is all of them. Asked
+  // "how many plots in each block", the model used to add up the 8 rows it could
+  // see and announce 182 plots when the answer across all 13 blocks was 278 — so
+  // it now has to be told the sample is partial, and told not to total it.
+  const preview = JSON.stringify(result.rows.slice(0, PREVIEW_ROWS)).slice(0, 2500);
+  const shown = Math.min(result.rowCount, PREVIEW_ROWS);
+  const partial = shown < result.rowCount;
   try {
     const text = await callGroq(
       [
@@ -1008,14 +1341,28 @@ async function summarise(question: string, result: Executed): Promise<string> {
           content:
             'Summarise database results for a housing-society admin in ONE short sentence. ' +
             'State the count and the most useful specific detail. Amounts are Pakistani rupees (PKR). ' +
-            'Never invent numbers that are not in the data. No preamble, no markdown.',
+            'Never invent numbers that are not in the data. ' +
+            'Do NOT add up, average, or otherwise compute across the rows — quote figures as ' +
+            'they appear. If a grand total is not present in the rows, do not state one. ' +
+            'No preamble, no markdown.',
         },
         {
           role: 'user',
           content:
             `Question: ${question}\n` +
-            `Rows returned: ${result.rowCount}${result.truncated ? ' (capped by limit)' : ''}\n` +
-            `Sample: ${preview.slice(0, 2000)}`,
+            `Rows returned: ${result.rowCount}\n` +
+            (result.truncated
+              ? `These are only the first ${result.rowCount} rows` +
+                (result.totalMatching !== undefined
+                  ? ` of ${result.totalMatching} matching records — state ${result.totalMatching} ` +
+                    'as the total, never the row count.\n'
+                  : ' — there are more, so do not present this as the total.\n')
+              : '') +
+            (partial
+              ? `Showing the first ${shown} of ${result.rowCount} rows — the rest are not ` +
+                'included, so any sum over these rows would be wrong.\n'
+              : '') +
+            `Rows: ${preview}`,
         },
       ],
       { maxTokens: 120 },
@@ -1033,14 +1380,28 @@ async function summarise(question: string, result: Executed): Promise<string> {
  * Answer a natural-language question about the database, read-only.
  */
 export async function answerQuestion(question: string): Promise<AiQueryResult> {
+  const layoutFacts = needsLayoutFacts(question);
   const messages: { role: string; content: string }[] = [
     { role: 'system', content: SCHEMA_PROMPT },
     { role: 'system', content: buildDateContext() },
     // Physical-layout facts (plot types, per-block ranges). Not database fields,
     // so the model cannot derive them — but ~600 tokens on every question would
     // halve the free tier's questions-per-minute, hence the gate.
-    ...(needsLayoutFacts(question)
-      ? [{ role: 'system', content: SOCIETY_FACTS }]
+    ...(layoutFacts
+      ? [{
+          role: 'system',
+          // Framed rather than dumped: the plan counts 440 drawn plots across
+          // blocks A–L, while the register holds 278 across A–L plus P. Handed
+          // the two figures unlabelled, the model tried to reconcile them and
+          // returned prose instead of a plan for "how many plots are there".
+          content:
+            'The following are facts from the paper site plan, NOT database rows. The plan and ' +
+            'the register do not agree — the plan shows every plot ever drawn, the register holds ' +
+            'the plots actually on the books. Answer from a database query whenever the question ' +
+            'can be answered from the register (counts, owners, blocks, dues), and use these ' +
+            'facts only for what the register cannot hold: plot types, amenities, plot-number ' +
+            'ranges on the map. Never return prose instead of a plan.\n\n' + SOCIETY_FACTS,
+        }]
       : []),
     { role: 'user', content: question },
   ];
@@ -1054,8 +1415,50 @@ export async function answerQuestion(question: string): Promise<AiQueryResult> {
   // back fixes it far more generally than special-casing each mistake here.
   for (let attempt = 0; attempt < 2 && !executed; attempt++) {
     const planRaw = await callGroq(messages, { json: true });
-    const parsed = parsePlanResponse(planRaw);
+
+    // A malformed or plan-less response is worth one more shot for the same
+    // reason a rejected plan is: it is usually a one-off slip, and "try
+    // rephrasing" puts the work back on the admin for a question that was fine.
+    // ("How many plots are there in total?" failed this way.)
+    let parsed: { plan?: any; reinterpreted?: string; unsupported?: string; answer?: string };
+    try {
+      parsed = parsePlanResponse(planRaw);
+    } catch (err) {
+      if (attempt === 1) throw err;
+      messages.push(
+        { role: 'assistant', content: planRaw.slice(0, 500) },
+        {
+          role: 'user',
+          content:
+            'That was not valid JSON. Reply with ONLY the JSON envelope — ' +
+            '{ "plan": { ... } } — and no prose, markdown, or code fences.',
+        },
+      );
+      continue;
+    }
     const plan = parsed.plan;
+
+    // A site-plan question ("how many prime plots", "what amenities are there")
+    // has no database field to query, so the envelope used to force
+    // `unsupported` — and the admin got an error for a question the model could
+    // answer from the layout facts in front of it, sometimes with the answer
+    // itself inside the refusal ("The plan states there are 117 prime plots").
+    // A prose answer is accepted ONLY when those facts were attached to this
+    // request, so it stays a channel for map knowledge and never a bypass that
+    // lets an unqueried claim about the database through.
+    if (typeof parsed.answer === 'string' && parsed.answer.trim() && !plan && layoutFacts) {
+      return {
+        answer: parsed.answer.trim().slice(0, 600),
+        rows: [],
+        columns: [],
+        rowCount: 0,
+        truncated: false,
+        plan: { source: 'site plan (frontend-admin/constants/societyMap.ts)', database: false },
+        note:
+          'Answered from the approved site plan, not the database — the register does not ' +
+          'store plot types or amenities, and the two do not always agree.',
+      };
+    }
 
     if (parsed.unsupported && !plan) {
       // Models over-use this verdict, most often claiming a question needs a
@@ -1085,7 +1488,19 @@ export async function answerQuestion(question: string): Promise<AiQueryResult> {
       );
     }
     if (!isPlainObject(plan) || typeof plan.op !== 'string') {
-      throw new AiQueryError('The AI did not return a usable query — try rephrasing.', 502);
+      if (attempt === 1) {
+        throw new AiQueryError('The AI did not return a usable query — try rephrasing.', 502);
+      }
+      messages.push(
+        { role: 'assistant', content: JSON.stringify(parsed).slice(0, 500) },
+        {
+          role: 'user',
+          content:
+            'That reply contained no query plan. Return { "plan": { "op": ... } } using one of ' +
+            'find, count, sumDuesByPlot, groupCount, sumAmount — or "unsupported" with a reason.',
+        },
+      );
+      continue;
     }
 
     try {
@@ -1094,11 +1509,12 @@ export async function answerQuestion(question: string): Promise<AiQueryResult> {
         case 'count':         executed = await executeCount(plan); break;
         case 'sumDuesByPlot': executed = await executeSumDuesByPlot(plan); break;
         case 'groupCount':    executed = await executeGroupCount(plan); break;
+        case 'duesSummary':   executed = await executeDuesSummary(plan); break;
         case 'sumAmount':     executed = await executeSumAmount(plan); break;
         default:
           throw new AiQueryError(
             `Unsupported operation "${plan.op}". Use one of: find, count, ` +
-              `sumDuesByPlot, groupCount, sumAmount.`,
+              `sumDuesByPlot, duesSummary, groupCount, sumAmount.`,
           );
       }
       // An execution-level substitution (the dues-ledger fallback) matters more
@@ -1136,7 +1552,7 @@ export async function answerQuestion(question: string): Promise<AiQueryResult> {
     executed.rowCount === 0 || executed.matched === 0
       ? 'No records matched. An empty result can mean the data was never recorded rather than ' +
         'that nothing is outstanding — check the query below to see what was actually asked of the database.'
-      : await summarise(question, executed);
+      : describeSingleRow(executed) ?? (await summarise(question, executed));
 
   // Union the keys — sparse docs would otherwise hide columns.
   const columns: string[] = [];
@@ -1152,6 +1568,7 @@ export async function answerQuestion(question: string): Promise<AiQueryResult> {
     columns,
     rowCount: executed.rowCount,
     truncated: executed.truncated,
+    ...(executed.totalMatching === undefined ? {} : { totalMatching: executed.totalMatching }),
     plan: executed.plan,
     ...(reinterpreted ? { note: String(reinterpreted).slice(0, 300) } : {}),
   };
