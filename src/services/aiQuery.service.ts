@@ -78,6 +78,15 @@ export interface AiQueryResult {
  */
 const isReasoningModel = (model: string) => /gpt-oss/i.test(model);
 
+/**
+ * Column label for a summed field. A bare "total <field>" produced
+ * "total totalReceived", which the admin table then title-cased into
+ * "TOTAL TOTAL RECEIVED", so a leading "total" already on the field name is
+ * dropped here.
+ */
+const totalLabel = (field: string) =>
+  `total ${field.replace(/^total([A-Z])/, (_m, c) => c.toLowerCase())}`;
+
 /** The operations a plan may name. */
 const SUPPORTED_OPS = [
   'find', 'count', 'sumDuesByPlot', 'duesSummary', 'groupCount', 'sumAmount',
@@ -1233,7 +1242,7 @@ async function executeSumAmount(rawPlan: Record<string, any>): Promise<Executed>
     return {
       rows: folded.map((g) => ({
         [plotGroupBy]: g.label,
-        [`total ${field}`]: g.total,
+        [totalLabel(field)]: g.total,
         records: g.count,
       })),
       plan: {
@@ -1257,8 +1266,8 @@ async function executeSumAmount(rawPlan: Record<string, any>): Promise<Executed>
   }
 
   const rows = groupBy
-    ? grouped.map((g) => ({ [groupBy]: g._id ?? '—', [`total ${field}`]: g.total, records: g.count }))
-    : [{ [`total ${field}`]: grouped[0]?.total ?? 0, records: grouped[0]?.count ?? 0 }];
+    ? grouped.map((g) => ({ [groupBy]: g._id ?? '—', [totalLabel(field)]: g.total, records: g.count }))
+    : [{ [totalLabel(field)]: grouped[0]?.total ?? 0, records: grouped[0]?.count ?? 0 }];
 
   return {
     rows,
