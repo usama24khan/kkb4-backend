@@ -64,6 +64,19 @@ jobs:
             exit 1
           fi
 
+          # PRODUCTION ONLY. The connection string must name kkb4production, so a
+          # secret that was pasted wrong — or pointed at the development cluster
+          # — stops the run instead of quietly backing up the wrong database for
+          # months. mongodump dumps only the database named in the URI path.
+          case "$MONGODB_URI" in
+            */kkb4production\?*|*/kkb4production) : ;;
+            *)
+              echo "MONGODB_URI does not name the kkb4production database. Refusing to run."
+              echo "This workflow backs up production only."
+              exit 1
+              ;;
+          esac
+
           STAMP=$(date -u +%Y-%m-%d)
           mongodump --uri="$MONGODB_URI" --gzip --archive="kkb4-$STAMP.archive.gz"
 
@@ -88,8 +101,19 @@ jobs:
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
             -in "kkb4-$STAMP.archive.gz.enc" -pass env:BACKUP_PASSPHRASE \
             > check.archive.gz
-          mongorestore --gzip --archive=check.archive.gz --dryRun --verbose=1 2>&1 | tail -20
-          rm check.archive.gz
+          mongorestore --gzip --archive=check.archive.gz --dryRun --verbose=1 2>&1 | tee restore-check.log | tail -20
+
+          # And confirm what is actually inside it: production collections only.
+          if grep -qE 'kkb4_maintenance|kkb4dev' restore-check.log; then
+            echo "The archive contains a non-production database. Refusing to keep it."
+            exit 1
+          fi
+          if ! grep -q 'kkb4production' restore-check.log; then
+            echo "The archive contains no kkb4production data. Something is wrong."
+            exit 1
+          fi
+          echo "verified: archive holds kkb4production only"
+          rm check.archive.gz restore-check.log
 
       - name: Keep it
         uses: actions/upload-artifact@v4

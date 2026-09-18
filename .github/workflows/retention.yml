@@ -49,6 +49,17 @@ jobs:
           NODE_ENV: production
         run: |
           set -euo pipefail
+
+          # PRODUCTION ONLY — this deletes files. A misdirected secret must stop
+          # the run, not purge the wrong environment.
+          case "$MONGODB_URI" in
+            */kkb4production\?*|*/kkb4production) : ;;
+            *)
+              echo "MONGODB_URI does not name the kkb4production database. Refusing to purge."
+              exit 1
+              ;;
+          esac
+
           # A scheduled run applies; a manual run only reports unless asked.
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.apply }}" = "true" ]; then
             npx ts-node src/scripts/purgePdfs.ts --apply --limit=500
