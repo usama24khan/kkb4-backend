@@ -1,0 +1,57 @@
+# PDF retention — deletes cached PDFs once they are old enough.
+#
+#   receipts: PDF removed after 365 days, rebuilt from the database on the next
+#             request (see scripts/purgePdfs.ts and RECEIPTS_NOTICES_PLAN.md)
+#   notices:  PDF removed after 180 days, the row kept as the record of service
+#
+# Runs after the backup window, so the night's copy is already taken before
+# anything is deleted.
+#
+# SETUP: the same MONGODB_URI secret as the backup workflow, plus
+#   CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET.
+#
+# To see what it would do without deleting anything, run it from the Actions tab
+# with "apply" left unchecked.
+
+name: Purge old PDFs
+
+on:
+  schedule:
+    - cron: "40 3 * * *" # 03:40 UTC, ~80 minutes after the backup starts
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Actually delete (unchecked = report only)"
+        type: boolean
+        default: false
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Purge
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          NODE_ENV: production
+        run: |
+          set -euo pipefail
+          # A scheduled run applies; a manual run only reports unless asked.
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.apply }}" = "true" ]; then
+            npx ts-node src/scripts/purgePdfs.ts --apply --limit=500
+          else
+            npx ts-node src/scripts/purgePdfs.ts --limit=500
+          fi

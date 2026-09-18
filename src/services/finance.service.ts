@@ -598,9 +598,16 @@ export async function recordCollection(
         console.warn('[finance] receipt PDF generation failed:', (err as Error).message);
       }
     } catch (err) {
-      // The payment itself is recorded; only the receipt failed. Surface it in
-      // the logs rather than losing the collection.
-      console.warn('[finance] receipt creation failed:', (err as Error).message);
+      // The payment itself is recorded and must not be rolled back — the money
+      // did change hands. But a missing receipt used to leave no trace beyond a
+      // log line, so it is recorded on the collection instead: the admin is told
+      // now, and the gap stays findable later.
+      const message = (err as Error).message || 'unknown error';
+      console.error('[finance] receipt creation failed:', message);
+      await Collection.updateOne(
+        { _id: collection._id },
+        { $set: { receiptError: message.slice(0, 300) } },
+      ).catch(() => {});
     }
   }
 

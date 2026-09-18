@@ -19,6 +19,18 @@ import {
 export interface UploadOptions {
   /** Ignored for raw resources (kept for call-site compatibility). */
   contentType?: string;
+  /**
+   * Also store an `image`-type copy so Cloudinary can rasterise page 1 for link
+   * previews (see THUMBNAIL_RESOURCE_TYPE).
+   *
+   * Off by default, because that copy is not cheap: measured on this account the
+   * preview copies came to 62 MB against 12 MB for the documents themselves —
+   * roughly 5x the file it previews, before derived thumbnails. Notices ask for
+   * it (they get shared to owners over WhatsApp, and are purged after 6 months
+   * anyway). Receipts do not: they are kept for a year, then regenerated on
+   * demand, so a second copy of every one of them is pure cost.
+   */
+  thumbnail?: boolean;
 }
 
 /**
@@ -31,7 +43,7 @@ export interface UploadOptions {
 export async function uploadToCloudinary(
   source: Buffer | string,
   key: string,
-  _opts: UploadOptions = {},
+  opts: UploadOptions = {},
 ): Promise<string> {
   if (!isCloudinaryConfigured()) {
     throw new Error(
@@ -67,10 +79,14 @@ export async function uploadToCloudinary(
     }
   });
 
-  // Best-effort second copy so link previews can show page 1. Never allowed to
-  // fail the caller: a missing thumbnail degrades the preview card, whereas a
-  // thrown error here would lose the notice/receipt the admin just generated.
-  void uploadPdfThumbnailSource(source, publicId);
+  // Best-effort second copy so link previews can show page 1 — only where the
+  // caller asked for it. Never allowed to fail the caller: a missing thumbnail
+  // degrades the preview card, whereas a thrown error here would lose the
+  // notice the admin just generated. `.catch` rather than a bare `void`, so a
+  // rejection can't surface as an unhandled rejection and take the process down.
+  if (opts.thumbnail) {
+    uploadPdfThumbnailSource(source, publicId).catch(() => {});
+  }
 
   return result.secure_url;
 }

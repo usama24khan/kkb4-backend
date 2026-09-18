@@ -23,6 +23,7 @@ import fs from "fs";
 import os from "os";
 import { IReceipt } from "../models/Receipt";
 import { uploadToCloudinary } from "../lib/uploadToCloudinary";
+import { getFromCloudinary, type CloudinaryObject } from "../lib/getFromCloudinary";
 import { registerUrduFont, URDU_FONT_FAMILY } from "./urduFont";
 import { forPdf, hasNonLatin as hasUrdu } from "./urduText";
 
@@ -166,6 +167,57 @@ function safeFileName(receiptNumber: string, language: string): string {
 const INK = "#0f172a";
 const MUTED = "#64748b";
 const LINE = "#cbd5e1";
+const VOID_RED = "#b91c1c";
+
+/**
+ * Stamp a cancelled receipt across the slip.
+ *
+ * Voiding used to change only the database: the cached PDF kept printing as a
+ * valid receipt, so the copy in an owner's hand contradicted the record. The
+ * stamp goes on last, over the finished card, and the reason sits under it so
+ * whoever is holding the paper knows why it was cancelled.
+ */
+function stampVoid(
+  doc: PDFKit.PDFDocument,
+  r: IReceipt,
+  ox: number,
+  oy: number,
+  w: number,
+  h: number,
+  /**
+   * Width to keep clear on the right, where the signature block sits. Without
+   * it the reason line printed straight through the society name.
+   */
+  reserveRight = 0,
+): void {
+  const cx = ox + w / 2;
+  const cy = oy + h / 2;
+
+  doc.save();
+  doc.rotate(-22, { origin: [cx, cy] });
+  doc
+    .font("Helvetica-Bold")
+    .fontSize(58)
+    .fillColor(VOID_RED)
+    .opacity(0.22)
+    .text("VOID", ox, cy - 34, { width: w, align: "center" });
+  doc.restore();
+
+  const reason = (r.voidReason || "").trim();
+  const pad = 20;
+  const textW = Math.max(80, w - pad * 2 - reserveRight);
+  doc
+    .font("Helvetica-Bold")
+    .fontSize(8)
+    .fillColor(VOID_RED)
+    .opacity(1)
+    .text(
+      reason ? `CANCELLED — ${reason}` : "CANCELLED",
+      ox + pad,
+      oy + h - 16,
+      { width: textW, align: "left", lineBreak: false, ellipsis: true },
+    );
+}
 
 function formatRs(n: number): string {
   return `Rs. ${Math.round(n || 0).toLocaleString("en-PK")}/-`;
@@ -351,6 +403,8 @@ function renderEnglishSlip(
     .strokeColor(LINE)
     .roundedRect(ox, oy, w, cardBottom - oy, 8)
     .stroke();
+
+  if (r.isVoided) stampVoid(doc, r, ox, oy, w, cardBottom - oy, sigW + pad);
 }
 
 function generateEnglishPDF(receipt: IReceipt): Promise<ReceiptResult> {
@@ -617,6 +671,12 @@ function renderUrduSlip(
   doc
     .roundedRect(boxX, CARD_TOP, boxW, cardBottom - CARD_TOP, mm(2.5))
     .stroke();
+
+  // The stamp itself is Latin ("VOID"), deliberately: it has to be unmistakable
+  // to anyone handling the slip, including at a bank counter.
+  if (p.isVoided) {
+    stampVoid(doc, p, boxX, CARD_TOP, boxW, cardBottom - CARD_TOP, sigW + mm(6));
+  }
 }
 
 // ─── Urdu PDF generator ─────────────────────────────────────────────────────
@@ -670,4 +730,44 @@ export async function generateReceiptPDF(
     }
   }
   return generateEnglishPDF(receipt);
+}
+
+/**
+ * The PDF for a receipt, generating or regenerating it whenever the cached copy
+ * is missing or unreachable.
+ *
+ * Lives here rather than in the controller because two callers need exactly the
+ * same behaviour: the download route, and the retention checks that prove a
+ * purged receipt still comes back. The cached file is only ever a cache — every
+ * field the slip prints is on the receipt row itself — so an unreachable object
+ * is a cache miss to be repaired, never an error to report.
+ *
+ * Returns the stream plus whether a rebuild was needed, which the caller may
+ * want to log.
+ */
+export async function fetchOrRebuildReceiptPdf(
+  receipt: IReceipt,
+): Promise<{ object: CloudinaryObject; rebuilt: boolean }> {
+  let rebuilt = false;
+
+  const rebuild = async () => {
+    const { url } = await generateReceiptPDF(receipt);
+    receipt.filePath = url;
+    await receipt.save();
+    rebuilt = true;
+  };
+
+  if (!receipt.filePath) await rebuild();
+
+  try {
+    return { object: await getFromCloudinary(receipt.filePath), rebuilt };
+  } catch (err: any) {
+    // Purged by the retention job, deleted by hand, or storage moved.
+    console.info(
+      `[receipt] ${receipt.receiptNumber}: cached PDF unavailable ` +
+        `(${err?.statusCode || err?.message}), regenerating`,
+    );
+    await rebuild();
+    return { object: await getFromCloudinary(receipt.filePath), rebuilt };
+  }
 }

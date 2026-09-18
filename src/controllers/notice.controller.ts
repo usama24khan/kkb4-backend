@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import Plot, { IPlot } from '../models/Plot';
 import Payment from '../models/Payment';
 import Notice from '../models/Notice';
+import { nextSequence } from '../models/Counter';
 import { generatePlotNotice, generateBulkNotices, computeBreakdown, type PaymentRecordLike } from '../utils/pdfGenerator';
 import { sendSuccess, sendError } from '../utils/responseHelper';
 import { AuthRequest } from '../middleware/auth.middleware';
@@ -27,6 +28,19 @@ function readNoticeOptions(body: any) {
     ? new Date(Date.now() + deadlineDays * 24 * 60 * 60 * 1000)
     : null;
   return { yearFrom, yearTo, language, minDues, paymentDeadline };
+}
+
+/**
+ * Reserve the batch number printed on a notice.
+ *
+ * Was `Notice.countDocuments() + 1`: not stored, not unique, and reused as soon
+ * as a row was removed. Two admins generating at the same moment got the same
+ * number — and because uploads overwrite by key, the second batch replaced the
+ * first batch's PDFs. An atomic counter fixes all three at once. Seeded from the
+ * existing document count so numbering continues rather than restarting.
+ */
+async function reserveNoticeNumber(): Promise<number> {
+  return nextSequence('notice', async () => Notice.countDocuments());
 }
 
 /**
@@ -134,7 +148,7 @@ async function runGeneration(
     return;
   }
 
-  const startNumber = (await Notice.countDocuments()) + 1;
+  const startNumber = await reserveNoticeNumber();
   const results = await generateBulkNotices(
     eligible.map((e) => ({ plot: e.plot, payments: e.payments })),
     yearFrom,
@@ -160,6 +174,7 @@ async function runGeneration(
     generatedBy: req.admin?.id,
     plotCount: eligible.length,
     totalDue,
+    noticeNumber: startNumber,
     pdfPath: pdfPaths[0] || '',
     pdfPaths,
   });
@@ -227,7 +242,7 @@ async function runGenerationWithTarget(
     return;
   }
 
-  const startNumber = (await Notice.countDocuments()) + 1;
+  const startNumber = await reserveNoticeNumber();
   const results = await generateBulkNotices(
     eligible.map((e) => ({ plot: e.plot, payments: e.payments })),
     yearFrom,
@@ -260,6 +275,7 @@ async function runGenerationWithTarget(
     generatedBy: req.admin?.id,
     plotCount: eligible.length,
     totalDue,
+    noticeNumber: startNumber,
     pdfPath: pdfPaths[0] || '',
     pdfPaths,
   });
@@ -289,7 +305,7 @@ export const generateForPlot = async (req: AuthRequest, res: Response): Promise<
 
     const { payments, outstanding } = await plotOutstanding(plot._id, yearFrom, yearTo);
 
-    const noticeNumber = (await Notice.countDocuments()) + 1;
+    const noticeNumber = await reserveNoticeNumber();
     const result = await generatePlotNotice({
       plot,
       payments,
@@ -312,6 +328,7 @@ export const generateForPlot = async (req: AuthRequest, res: Response): Promise<
       generatedBy: req.admin?.id,
       plotCount: 1,
       totalDue: outstanding,
+      noticeNumber,
       pdfPath: result.pdfPath,
       pdfPaths: [result.pdfPath],
     });
@@ -478,6 +495,19 @@ export const downloadNoticeById = async (req: Request, res: Response): Promise<v
     const url = candidates[Number.isFinite(idx) ? idx : 0] || notice.pdfPath;
 
     if (!url) {
+      // Retention, not a fault: notice letters are kept 180 days. The row stays
+      // as the record that the notice was served, so say so plainly rather than
+      // reporting a missing file.
+      if (notice.pdfsPurgedAt) {
+        sendError(
+          res,
+          `This notice was served on ${new Date(notice.createdAt).toLocaleDateString('en-GB')}. ` +
+            'Notice letters are kept for 180 days, so the PDF is no longer stored — ' +
+            'the record of who was served, when, and for how much is retained.',
+          410,
+        );
+        return;
+      }
       sendError(res, 'No PDF associated with this notice', 404);
       return;
     }

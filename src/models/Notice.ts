@@ -24,8 +24,24 @@ export interface INotice extends Document {
   generatedBy: Types.ObjectId;
   plotCount: number;
   totalDue: number;
+  /**
+   * Stable, unique batch number, allocated from an atomic counter and printed on
+   * the PDFs. Previously the printed number was `countDocuments() + 1`, which
+   * was never stored, repeated itself whenever a row was removed, and gave two
+   * simultaneous batches the same number — and since uploads overwrite by key,
+   * the second batch replaced the first batch's files.
+   */
+  noticeNumber?: number;
   pdfPath: string;
   pdfPaths: string[];
+  /**
+   * When the PDFs were deleted by the retention job. Notices are working
+   * paperwork: the letters are kept 180 days, then removed to keep storage flat.
+   * The row itself is kept forever — it is the answer to "was this owner warned,
+   * when, and for how much" — so the UI shows this date instead of offering a
+   * download that would 404.
+   */
+  pdfsPurgedAt?: Date | null;
   createdAt: Date;
 }
 
@@ -46,8 +62,10 @@ const NoticeSchema = new Schema<INotice>(
     generatedBy: { type: Schema.Types.ObjectId, ref: "Admin" },
     plotCount: { type: Number, default: 1 },
     totalDue: { type: Number, default: 0 },
+    noticeNumber: { type: Number, index: true },
     pdfPath: { type: String, default: "" },
     pdfPaths: { type: [String], default: [] },
+    pdfsPurgedAt: { type: Date, default: null },
   },
   {
     timestamps: true,
@@ -55,5 +73,8 @@ const NoticeSchema = new Schema<INotice>(
 );
 
 NoticeSchema.index({ createdAt: -1 });
+// The history view filters by scope and target; the retention job scans by date.
+NoticeSchema.index({ type: 1, targetId: 1, createdAt: -1 });
+NoticeSchema.index({ pdfsPurgedAt: 1, createdAt: 1 });
 
 export default mongoose.model<INotice>("Notice", NoticeSchema);

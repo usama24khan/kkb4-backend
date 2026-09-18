@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document, Types } from "mongoose";
+import { nextSequence } from "./Counter";
 
 /**
  * Receipt
@@ -101,15 +102,30 @@ const ReceiptSchema = new Schema<IReceipt>(
 // Per-year uniqueness of the numeric id; the global receiptNumber stays unique too.
 ReceiptSchema.index({ year: 1, receiptNumericId: -1 });
 ReceiptSchema.index({ createdAt: -1 });
+// A plot's own receipt history — opened every time an admin views a plot, and
+// the one query that would otherwise scan the whole archive as it grows.
+ReceiptSchema.index({ plotRef: 1, createdAt: -1 });
+// The retention job's scan: old receipts that still hold a cached PDF.
+ReceiptSchema.index({ createdAt: 1, filePath: 1 });
 
 /**
- * Auto-increment the per-year numeric id and format the human-readable
- * receipt number *before* validation. Only runs for brand-new documents that
- * don't already carry a receiptNumber.
+ * Allocate the receipt number before validation, for brand-new documents that
+ * don't already carry one.
  *
- * Note: the read-then-write is not transactional; the unique index on
- * `receiptNumber` is the backstop against a concurrent-creation race (a
- * duplicate insert throws E11000, surfaced as a retry-able 409).
+ * The number comes from an atomic counter (`receipt-<year>` in the `counters`
+ * collection), NOT from reading the current maximum. Reading the maximum loses
+ * receipts under concurrency: two payments recorded in the same moment read the
+ * same maximum, and the loser fails on the unique index — which in the
+ * record-payment flow meant money recorded with no receipt at all. See the
+ * docblock on `nextSequence` for why `$inc` is the only correct answer here.
+ *
+ * The counter is seeded from the existing maximum the first time a year is
+ * used, so an existing series continues instead of restarting at 1.
+ *
+ * A number is consumed even if the save then fails for some other reason, so
+ * the series can contain gaps. That is the right trade: a gap is a question an
+ * admin can answer ("nothing was issued as 0042"), whereas a duplicate receipt
+ * number is a dispute with an owner.
  */
 ReceiptSchema.pre("validate", async function (next) {
   try {
@@ -117,18 +133,30 @@ ReceiptSchema.pre("validate", async function (next) {
 
     const year = this.year || new Date().getFullYear();
     const ReceiptModel = this.constructor as mongoose.Model<IReceipt>;
-    const last = await ReceiptModel.findOne({ year })
-      .sort({ receiptNumericId: -1 })
-      .select("receiptNumericId")
-      .lean();
 
-    const nextId = (last?.receiptNumericId ?? 0) + 1;
+    const nextId = await nextSequence(`receipt-${year}`, async () => {
+      const last = await ReceiptModel.findOne({ year })
+        .sort({ receiptNumericId: -1 })
+        .select("receiptNumericId")
+        .lean();
+      return last?.receiptNumericId ?? 0;
+    });
+
     this.receiptNumericId = nextId;
-    this.receiptNumber = `KKB-${year}-${String(nextId).padStart(4, "0")}`;
+    this.receiptNumber = formatReceiptNumber(year, nextId);
     next();
   } catch (err) {
     next(err as Error);
   }
 });
+
+/**
+ * `KKB-2026-0001`. Four digits covers this society comfortably (278 plots can
+ * produce at most ~3,300 receipts a year); past 9,999 the number simply grows a
+ * digit rather than wrapping, so the sequence stays correct either way.
+ */
+export function formatReceiptNumber(year: number, numericId: number): string {
+  return `KKB-${year}-${String(numericId).padStart(4, "0")}`;
+}
 
 export default mongoose.model<IReceipt>("Receipt", ReceiptSchema);

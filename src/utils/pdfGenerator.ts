@@ -81,9 +81,12 @@ async function uploadNoticeAndCleanup(
   yearLabel: string,
 ): Promise<string> {
   try {
+    // Notices carry the preview copy: they get shared to owners as links, and
+    // they are purged after 180 days so the extra storage is bounded.
     const url = await uploadToCloudinary(
       tmpPath,
       noticeKey(path.basename(tmpPath), yearLabel),
+      { thumbnail: true },
     );
     return url;
   } finally {

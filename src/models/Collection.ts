@@ -74,6 +74,13 @@ export interface ICollection extends Document {
   countInCashBook: boolean;
 
   receiptRef?: Types.ObjectId | null;
+  /**
+   * Set when a receipt was wanted for this payment but could not be created.
+   * Without it a failed receipt was invisible: the money was recorded and the
+   * only trace of the missing slip was a line in the server log. A nightly
+   * check can now find these and an admin can reissue.
+   */
+  receiptError?: string;
   note: string;
   recordedBy?: Types.ObjectId | null;
 
@@ -116,6 +123,7 @@ const CollectionSchema = new Schema<ICollection>(
     countInCashBook: { type: Boolean, default: true },
 
     receiptRef: { type: Schema.Types.ObjectId, ref: 'Receipt', default: null },
+    receiptError: { type: String, default: '' },
     note: { type: String, default: '', trim: true },
     recordedBy: { type: Schema.Types.ObjectId, ref: 'Admin', default: null },
 

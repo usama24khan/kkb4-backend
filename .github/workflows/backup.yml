@@ -1,0 +1,142 @@
+# Nightly database backup.
+#
+# The receipt archive is the database: PDFs are a cache that gets purged after a
+# year and rebuilt from these rows on demand. Atlas free-tier clusters have no
+# snapshots of their own, so without this workflow a dropped database is the end
+# of twenty years of receipts.
+#
+# The dump is small — 20 years of receipts is roughly 70 MB uncompressed, and
+# gzip takes a large bite out of that — so a nightly full dump is the simple,
+# correct choice. No incremental logic to get wrong.
+#
+# SETUP (once):
+#   Settings → Secrets and variables → Actions:
+#     MONGODB_URI              the production connection string
+#     BACKUP_PASSPHRASE        any long random string; REQUIRED to restore
+#   Atlas → Network Access:
+#     GitHub-hosted runners have no fixed IP, so the cluster must accept
+#     0.0.0.0/0 for this to connect. On a free tier that is the only option;
+#     the database user's password is what protects it, so make it long.
+#
+#   Store BACKUP_PASSPHRASE somewhere OUTSIDE this repo and outside GitHub.
+#   An encrypted archive whose passphrase lived only in the thing that failed is
+#   not a backup.
+#
+# RESTORING: see docs/RESTORE.md
+
+name: Backup database
+
+on:
+  schedule:
+    # 02:20 UTC ≈ 07:20 in Pakistan — after the day's data entry, before morning.
+    - cron: "20 2 * * *"
+  workflow_dispatch: # run by hand from the Actions tab
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # GitHub does not allow `secrets` inside an `if:` condition, so the
+      # optional long-term store is surfaced as an env var and tested on that.
+      BACKUP_REPO: ${{ secrets.BACKUP_REPO }}
+
+    steps:
+      - name: Install MongoDB database tools
+        run: |
+          set -euo pipefail
+          # Pinned deliberately: a silent major bump here would only be noticed
+          # the day a restore is attempted.
+          VERSION=100.10.0
+          curl -fsSL -o tools.tgz \
+            "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-$VERSION.tgz"
+          tar -xzf tools.tgz
+          echo "$PWD/mongodb-database-tools-ubuntu2204-x86_64-$VERSION/bin" >> "$GITHUB_PATH"
+
+      - name: Dump and encrypt
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MONGODB_URI:-}" ] || [ -z "${BACKUP_PASSPHRASE:-}" ]; then
+            echo "MONGODB_URI and BACKUP_PASSPHRASE must both be set. See the header of this file."
+            exit 1
+          fi
+
+          STAMP=$(date -u +%Y-%m-%d)
+          mongodump --uri="$MONGODB_URI" --gzip --archive="kkb4-$STAMP.archive.gz"
+
+          # AES-256 with a passphrase-derived key. -pbkdf2 with a high iteration
+          # count so a weak passphrase is still expensive to attack.
+          openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt \
+            -in "kkb4-$STAMP.archive.gz" \
+            -out "kkb4-$STAMP.archive.gz.enc" \
+            -pass env:BACKUP_PASSPHRASE
+          rm "kkb4-$STAMP.archive.gz"
+
+          echo "STAMP=$STAMP" >> "$GITHUB_ENV"
+          ls -lh "kkb4-$STAMP.archive.gz.enc"
+
+      - name: Verify the archive is readable before trusting it
+        env:
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          # Decrypt to a stream and let mongorestore parse it in dry-run mode.
+          # A backup that has never been read back is only a hope.
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
+            -in "kkb4-$STAMP.archive.gz.enc" -pass env:BACKUP_PASSPHRASE \
+            > check.archive.gz
+          mongorestore --gzip --archive=check.archive.gz --dryRun --verbose=1 2>&1 | tail -20
+          rm check.archive.gz
+
+      - name: Keep it
+        uses: actions/upload-artifact@v4
+        with:
+          name: kkb4-backup-${{ env.STAMP }}
+          path: kkb4-${{ env.STAMP }}.archive.gz.enc
+          # GitHub caps artifact retention at 90 days, which covers "something
+          # went wrong recently". Long-term copies come from the step below.
+          retention-days: 90
+          if-no-files-found: error
+
+      # Optional second home, for keeping a copy longer than 90 days. Create an
+      # empty PRIVATE repo, add its "owner/name" as BACKUP_REPO and a PAT with
+      # contents:write as BACKUP_REPO_TOKEN. Skipped entirely when unset.
+      - name: Push a long-term copy
+        if: env.BACKUP_REPO != ''
+        env:
+          BACKUP_REPO_TOKEN: ${{ secrets.BACKUP_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 \
+            "https://x-access-token:$BACKUP_REPO_TOKEN@github.com/$BACKUP_REPO.git" store
+          cd store
+          mkdir -p "$(date -u +%Y)"
+          cp "../kkb4-$STAMP.archive.gz.enc" "$(date -u +%Y)/"
+
+          # Daily copies for a month, then one per month — so a year-old state
+          # is still reachable without the repo growing without bound.
+          #
+          # Pruned by the DATE IN THE FILENAME, not file mtime: a fresh clone
+          # stamps every file with the time it was checked out, which would make
+          # an mtime rule either delete everything or nothing.
+          CUTOFF=$(date -u -d '31 days ago' +%Y-%m-%d)
+          for f in */kkb4-*.archive.gz.enc; do
+            [ -e "$f" ] || continue
+            day=$(basename "$f" | sed -E 's/^kkb4-([0-9]{4}-[0-9]{2}-[0-9]{2}).*/\1/')
+            case "$day" in
+              *-01) continue ;;                      # keep the 1st of each month
+            esac
+            if [ "$day" \< "$CUTOFF" ]; then
+              echo "pruning $f"
+              rm -f "$f"
+            fi
+          done
+
+          git config user.name "kkb4-backup"
+          git config user.email "backup@kkb4.local"
+          git add -A
+          git commit -m "backup $STAMP" || echo "nothing new"
+          git push

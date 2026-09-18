@@ -4,18 +4,21 @@ import Receipt from "../models/Receipt";
 import Plot from "../models/Plot";
 import { AuthRequest } from "../middleware/auth.middleware";
 import { sendSuccess, sendError } from "../utils/responseHelper";
-import { generateReceiptPDF } from "../utils/receiptPdfGenerator";
-import { getFromCloudinary } from "../lib/getFromCloudinary";
+import {
+  generateReceiptPDF,
+  fetchOrRebuildReceiptPdf,
+} from "../utils/receiptPdfGenerator";
 import { deleteFromCloudinary } from "../lib/deleteFromCloudinary";
 
 const CURRENT_YEAR = new Date().getFullYear();
 
 /**
  * GET /receipts
- * Query: page, limit, q (search)
+ * Query: page, limit, q (search), plot_id, year, from, to, voided
  *
  * Lists receipts newest-first with pagination. `q` matches receiptNumber,
- * block, plot, or owner name (case-insensitive).
+ * block, plot, or owner name (case-insensitive); `year` and `from`/`to` (on
+ * paymentDate) narrow an archive that keeps growing.
  */
 export const getReceipts = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -36,6 +39,32 @@ export const getReceipts = async (req: Request, res: Response): Promise<void> =>
       }
       filter.plotRef = new Types.ObjectId(plotId);
     }
+
+    // Year and date range. A free-text search across four fields cannot use an
+    // index, so on an archive that grows for twenty years these narrow the scan
+    // to something an index can answer. "Receipts for plot 374 in 2031" is the
+    // question an admin actually asks.
+    const year = parseInt(String(req.query.year || ""), 10);
+    if (Number.isFinite(year) && year > 1900) filter.year = year;
+
+    const from = String(req.query.from || "").trim();
+    const to = String(req.query.to || "").trim();
+    if (from || to) {
+      const range: Record<string, Date> = {};
+      const fromDate = from ? new Date(from) : null;
+      const toDate = to ? new Date(to) : null;
+      if (fromDate && !isNaN(fromDate.getTime())) range.$gte = fromDate;
+      if (toDate && !isNaN(toDate.getTime())) {
+        // Inclusive of the end date: a range typed as 01–31 January must include
+        // everything issued on the 31st, not stop at its first second.
+        toDate.setHours(23, 59, 59, 999);
+        range.$lte = toDate;
+      }
+      if (Object.keys(range).length) filter.paymentDate = range;
+    }
+
+    if (String(req.query.voided || "") === "true") filter.isVoided = true;
+    if (String(req.query.voided || "") === "false") filter.isVoided = { $ne: true };
 
     if (q) {
       const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
@@ -158,14 +187,19 @@ export const getReceipt = async (req: Request, res: Response): Promise<void> => 
 };
 
 /**
- * GET /receipts/:id/pdf — stream the receipt PDF from Cloudinary.
+ * GET /receipts/:id/pdf — stream the receipt PDF.
  * Public (no auth) so the admin UI can open it via window.open without
  * attaching the bearer token — mirrors the notice download endpoint.
  *
- * The PDF is generated and uploaded to Cloudinary lazily on the first request
- * and the URL is cached on `receipt.filePath`; subsequent requests stream the
- * cached object directly. Receipts are immutable (no edit endpoint), so the
- * cache never goes stale.
+ * THE STORED PDF IS A CACHE, NOT THE RECORD. Every field the slip prints lives
+ * on the receipt document itself (see receiptPdfGenerator — it reads no Plot and
+ * no Payment), so the file can always be rebuilt. That is what lets old PDFs be
+ * purged from storage after a year to keep the hosting bill flat: a purged
+ * receipt is a cache miss, not a loss.
+ *
+ * So a missing or unreachable object must never be an error. Previously it was:
+ * the fetch threw and the endpoint answered 500 for good, even though the data
+ * was intact. Now anything short of a genuine rendering failure regenerates.
  */
 export const generatePDF = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -175,16 +209,9 @@ export const generatePDF = async (req: Request, res: Response): Promise<void> =>
       return;
     }
 
-    // Generate + upload on first request; cache the URL on the document.
-    if (!receipt.filePath) {
-      const { url } = await generateReceiptPDF(receipt);
-      receipt.filePath = url;
-      await receipt.save();
-    }
+    const { object: obj } = await fetchOrRebuildReceiptPdf(receipt);
 
     const fileName = `${receipt.receiptNumber || "receipt"}.pdf`;
-    const obj = await getFromCloudinary(receipt.filePath);
-
     res.setHeader("Content-Type", obj.contentType || "application/pdf");
     if (obj.contentLength) res.setHeader("Content-Length", String(obj.contentLength));
     res.setHeader("Content-Disposition", `inline; filename="${fileName}"`);
@@ -200,23 +227,49 @@ export const generatePDF = async (req: Request, res: Response): Promise<void> =>
 };
 
 /**
- * DELETE /receipts/:id — hard delete (also removes the cached PDF from Cloudinary).
+ * POST /receipts/:id/void — cancel a receipt without destroying it.
+ *
+ * Replaces the old hard delete. A receipt number has already been handed to an
+ * owner, so the record has to survive being wrong: deleting it left a permanent
+ * hole in the KKB-YYYY-#### series, orphaned the cash-book entry's `receiptRef`,
+ * and destroyed the only proof of what was collected. Voiding keeps the row,
+ * marks it cancelled, and re-renders the slip with a VOID stamp so the paper and
+ * the database agree.
+ *
+ * Note this voids the RECEIPT only. When the payment itself was a mistake, void
+ * the collection in Accounts instead — that reverses the dues and the income and
+ * voids this receipt along with them.
  */
-export const deleteReceipt = async (req: AuthRequest, res: Response): Promise<void> => {
+export const voidReceipt = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const receipt = await Receipt.findByIdAndDelete(req.params.id);
+    const receipt = await Receipt.findById(req.params.id);
     if (!receipt) {
       sendError(res, "Receipt not found", 404);
       return;
     }
-    // Best-effort cleanup of the cached PDF; don't fail the delete on error.
-    if (receipt.filePath) {
-      deleteFromCloudinary(receipt.filePath).catch((e) =>
-        console.warn("[receipt.delete] Cloudinary cleanup failed:", e?.message),
+    if (receipt.isVoided) {
+      sendSuccess(res, receipt, "Receipt was already voided");
+      return;
+    }
+
+    const reason = String(req.body?.reason || "").trim();
+    receipt.isVoided = true;
+    receipt.isVerified = false;
+    receipt.voidReason = reason;
+
+    // Drop the cached PDF so the next request re-renders it with the stamp.
+    const stale = receipt.filePath;
+    receipt.filePath = "";
+    await receipt.save();
+
+    if (stale) {
+      deleteFromCloudinary(stale).catch((e) =>
+        console.warn("[receipt.void] Cloudinary cleanup failed:", e?.message),
       );
     }
-    sendSuccess(res, { _id: receipt._id }, "Receipt deleted");
+
+    sendSuccess(res, receipt, "Receipt voided");
   } catch (error: any) {
-    sendError(res, "Failed to delete receipt", 500, error.message);
+    sendError(res, "Failed to void receipt", 500, error.message);
   }
 };

@@ -115,7 +115,8 @@ export const FIELDS: Record<CollectionName, string[]> = {
   collections: [
     '_id', 'plot', 'amount', 'method', 'receivedDate', 'bookYear', 'bookMonth',
     'bookOrdinal', 'arrearsAmount', 'currentAmount', 'advanceAmount',
-    'unallocatedAmount', 'entryType', 'countInCashBook', 'receiptRef', 'note',
+    'unallocatedAmount', 'entryType', 'countInCashBook', 'receiptRef',
+    'receiptError', 'note',
     'isVoided', 'voidedAt', 'voidReason', 'createdAt', 'updatedAt',
   ],
   // `attachmentUrl` omitted — a raw bill-image URL has no analytical use.
@@ -134,9 +135,10 @@ export const FIELDS: Record<CollectionName, string[]> = {
   // `pdfPath`/`pdfPaths` omitted — file paths, not data. `generatedBy` omitted
   // because it is an admin ObjectId the model can do nothing useful with.
   notices: [
-    '_id', 'type', 'targetId', 'targetLabel', 'year', 'yearFrom', 'yearTo',
-    'monthFrom', 'monthTo', 'language', 'paymentDeadline', 'minDuesThreshold',
-    'plotCount', 'totalDue', 'createdAt', 'updatedAt',
+    '_id', 'type', 'targetId', 'targetLabel', 'noticeNumber', 'year', 'yearFrom',
+    'yearTo', 'monthFrom', 'monthTo', 'language', 'paymentDeadline',
+    'minDuesThreshold', 'plotCount', 'totalDue', 'pdfsPurgedAt',
+    'createdAt', 'updatedAt',
   ],
 };
 
@@ -329,6 +331,9 @@ bookYear 2026/bookMonth 3 here and year 2015 in \`payments\`. Route by that:
     record of money received; the cash book holds only what an admin typed in and
     is near-empty, so it answers zero).
 - plot (-> plots), amount (number), method ("cash"|"bank"|"online"|"cheque"|"other")
+- receiptRef (-> receipts; null when no receipt was issued), receiptError
+  (string, non-empty when a receipt was wanted but could not be created — so
+  { "receiptError": { "$ne": "" } } finds payments missing their slip)
 - receivedDate (date); bookYear, bookMonth (1-12) — the period the cash landed
   in; bookOrdinal = bookYear*12 + bookMonth, for ranges
 - arrearsAmount / currentAmount / advanceAmount — the part of \`amount\` paying for
@@ -367,6 +372,10 @@ about historical or archival entries.
 - language ("en"|"ur"), paymentDeadline (date|null)
 - minDuesThreshold (number) — the dues cut-off the batch used
 - plotCount, totalDue (number) — plots covered and dues issued for
+- noticeNumber (number) — the batch number printed on the letters
+- pdfsPurgedAt (date|null) — notice PDFs are kept 180 days, then deleted; the row
+  stays as the record of service, so a date here means the letter is no longer
+  stored, NOT that no notice was sent
 **No plot reference**, so plotFilter does not work here; use targetId/targetLabel.
 
 ### Lookup collections
