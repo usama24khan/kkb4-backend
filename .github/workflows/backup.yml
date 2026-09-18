@@ -36,6 +36,18 @@ jobs:
   dump:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
+    # A throwaway MongoDB to restore each night's archive into. Without it the
+    # verification below has no server to talk to — `mongorestore --dryRun`
+    # still opens a connection, so it fell back to localhost and failed.
+    # Restoring for real is the stronger check anyway: it proves the archive
+    # rebuilds, not merely that it parses.
+    services:
+      verify:
+        image: mongo:7
+        ports:
+          - 27017:27017
+
     env:
       # GitHub does not allow `secrets` inside an `if:` condition, so the
       # optional long-term store is surfaced as an env var and tested on that.
@@ -52,6 +64,17 @@ jobs:
             "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-$VERSION.tgz"
           tar -xzf tools.tgz
           echo "$PWD/mongodb-database-tools-ubuntu2204-x86_64-$VERSION/bin" >> "$GITHUB_PATH"
+
+      - name: Install mongosh
+        # Only used to print the restored document counts, so a failure here
+        # must not fail the backup.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          curl -fsSL -o mongosh.tgz \
+            "https://downloads.mongodb.com/compass/mongosh-2.3.8-linux-x64.tgz"
+          tar -xzf mongosh.tgz
+          echo "$PWD/mongosh-2.3.8-linux-x64/bin" >> "$GITHUB_PATH"
 
       - name: Dump and encrypt
         env:
@@ -91,28 +114,45 @@ jobs:
           echo "STAMP=$STAMP" >> "$GITHUB_ENV"
           ls -lh "kkb4-$STAMP.archive.gz.enc"
 
-      - name: Verify the archive is readable before trusting it
+      - name: Restore it into a throwaway database to prove it works
         env:
           BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
         run: |
           set -euo pipefail
-          # Decrypt to a stream and let mongorestore parse it in dry-run mode.
-          # A backup that has never been read back is only a hope.
+
+          # 1. Does the passphrase open it?
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
             -in "kkb4-$STAMP.archive.gz.enc" -pass env:BACKUP_PASSPHRASE \
             > check.archive.gz
-          mongorestore --gzip --archive=check.archive.gz --dryRun --verbose=1 2>&1 | tee restore-check.log | tail -20
 
-          # And confirm what is actually inside it: production collections only.
+          # 2. Does it restore? Into the disposable service container, never
+          #    anywhere real. A backup nobody has restored is only a hope.
+          mongorestore --uri="mongodb://localhost:27017" \
+            --gzip --archive=check.archive.gz --verbose=1 2>&1 \
+            | tee restore-check.log | tail -30
+
+          # 3. Is the right data inside it?
           if grep -qE 'kkb4_maintenance|kkb4dev' restore-check.log; then
-            echo "The archive contains a non-production database. Refusing to keep it."
+            echo "::error::The archive contains a non-production database. Refusing to keep it."
             exit 1
           fi
           if ! grep -q 'kkb4production' restore-check.log; then
-            echo "The archive contains no kkb4production data. Something is wrong."
+            echo "::error::The archive contains no kkb4production data."
             exit 1
           fi
-          echo "verified: archive holds kkb4production only"
+          if grep -qE '[1-9][0-9]* document\(s\) failed to restore' restore-check.log; then
+            echo "::error::Some documents failed to restore — the archive is damaged."
+            exit 1
+          fi
+
+          # 4. Say what came back, so the run tells you something useful.
+          echo "--- restored ---"
+          mongosh "mongodb://localhost:27017/kkb4production" --quiet --eval '
+            db.getCollectionNames().sort().forEach(c => {
+              print(c.padEnd(24) + db.getCollection(c).countDocuments());
+            });
+          ' || echo "(mongosh unavailable — restore log above is the record)"
+
           rm check.archive.gz restore-check.log
 
       - name: Keep it
