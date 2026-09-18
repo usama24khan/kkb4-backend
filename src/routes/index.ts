@@ -16,6 +16,9 @@ import complaintRoutes from './complaint.routes';
 import aiQueryRoutes from './aiQuery.routes';
 import publicDocumentRoutes from './publicDocument.routes';
 import financeRoutes from './finance.routes';
+import mongoose from 'mongoose';
+import { env } from '../config/env';
+import { isCloudinaryConfigured } from '../lib/cloudinary';
 
 const router = Router();
 
@@ -37,9 +40,37 @@ router.use('/ai', aiQueryRoutes);
 router.use('/public', publicDocumentRoutes);
 router.use('/finance', financeRoutes);
 
-// Health check
+/**
+ * Health check, including which optional integrations this deployment can
+ * actually reach.
+ *
+ * Environment variables are per-environment on Vercel and their values are
+ * hidden in the dashboard, so "is storage configured in production?" was a
+ * question nobody could answer by looking — and the honest answer matters:
+ * without storage, receipts are recorded but their PDFs cannot be stored or
+ * regenerated. Booleans only. No names, no values, nothing that helps anyone
+ * who should not have them.
+ */
 router.get('/health', (_req, res) => {
-  res.json({ success: true, message: 'KKB4 API is running', timestamp: new Date().toISOString() });
+  const configured = {
+    // 1 = connected, per mongoose's readyState.
+    database: mongoose.connection.readyState === 1,
+    // PDF storage for receipts and notices.
+    storage: isCloudinaryConfigured(),
+    // The AI database chat.
+    ai: Boolean(env.GROQ_API_KEY),
+    // OTP delivery for admin sign-in.
+    email: Boolean(env.EMAIL_FROM && env.EMAIL_APP_PASSWORD),
+  };
+
+  res.json({
+    success: true,
+    message: 'KKB4 API is running',
+    environment: env.NODE_ENV,
+    database: mongoose.connection.name || null,
+    configured,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 export default router;
